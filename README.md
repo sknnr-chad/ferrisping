@@ -132,7 +132,7 @@ checks. There are no dates.
 ## Contributing
 
 Issues and pull requests are welcome. FerrisPing is a small project looked after in spare time, so answers may take
-a while. Please run the checks above before sending a pull request.
+a while. Please run the checks above before sending a pull request; GitHub runs them on it too.
 
 ## About
 
