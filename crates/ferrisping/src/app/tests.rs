@@ -777,6 +777,29 @@ fn a_host_renamed_from_its_lane_keeps_its_graph_and_its_new_name() {
 }
 
 #[test]
+fn a_saved_block_too_big_to_ping_comes_back_as_one_host_that_says_why() {
+    // The add box expands blocks and ranges, so one saved as typed is one it couldn't.
+    let saved = Saved {
+        hosts: vec!["10.0.0.0/16 Lab".into()],
+        ..answered()
+    };
+    let mut harness = app_saved(Args::default(), window::SIZE, saved);
+    wait_for(&mut harness, "the lookup", |h| {
+        h.state().monitor.read().hosts[0].status == HostStatus::ResolveFailed
+    });
+    harness.run_steps(2);
+    assert_eq!(hosts(&harness), ["10.0.0.0/16"]);
+    assert!(beside(&harness, "Lab", "10.0.0.0/16"));
+    harness.get_by_label("Can't resolve");
+    // The lane shows why where its graph would be, and the events list has it too.
+    let why = "Too many addresses: the biggest block is a /24";
+    let error = harness.state().monitor.read().hosts[0].resolve_error.clone();
+    assert_eq!(error.as_deref(), Some(why));
+    let event = format!("Can't resolve: {why}");
+    assert!(harness.query_by_label_contains(&event).is_some());
+}
+
+#[test]
 fn the_route_panel_names_each_hops_network() {
     let mut harness = app_with(Args::parse(["--route", "127.0.0.1"].into_iter().map(String::from)));
     wait_for(&mut harness, "the route", route_reached);
