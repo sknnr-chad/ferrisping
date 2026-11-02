@@ -393,20 +393,23 @@ fn route_panel_fits_its_route_and_resizes_from_its_top_edge() {
     assert!((edge(&harness).top() - fitted).abs() < 1.0);
 }
 
-/// The text the app put on the clipboard within a few frames, if any.
-fn text_copied(harness: &mut Harness<'_, FerrisPingApp>) -> Option<String> {
+/// The first thing `pick` finds among what the app asked of the platform (the
+/// clipboard, the browser) within a few frames.
+fn output_within<T>(
+    harness: &mut Harness<'_, FerrisPingApp>,
+    pick: impl Fn(&egui::OutputCommand) -> Option<T>,
+) -> Option<T> {
     (0..4).find_map(|_| {
         harness.step();
-        harness
-            .output()
-            .platform_output
-            .commands
-            .iter()
-            .find_map(|command| match command {
-                egui::OutputCommand::CopyText(text) => Some(text.clone()),
-                _ => None,
-            })
+        harness.output().platform_output.commands.iter().find_map(&pick)
     })
+}
+
+fn copied(command: &egui::OutputCommand) -> Option<String> {
+    match command {
+        egui::OutputCommand::CopyText(text) => Some(text.clone()),
+        _ => None,
+    }
 }
 
 #[test]
@@ -414,7 +417,7 @@ fn copy_report_puts_the_route_on_the_clipboard() {
     let mut harness = app_with(Args::parse(["--route", "127.0.0.1"].into_iter().map(String::from)));
     wait_for(&mut harness, "the route", route_reached);
     harness.get_by_label("Copy report").click();
-    let report = text_copied(&mut harness).expect("the report goes to the clipboard");
+    let report = output_within(&mut harness, copied).expect("the report goes to the clipboard");
     assert!(
         report.starts_with("FerrisPing route to 127.0.0.1 (127.0.0.1) since "),
         "{report}"
@@ -715,21 +718,8 @@ fn open_more_options(harness: &mut Harness<'_, FerrisPingApp>) {
     harness.run_steps(2);
 }
 
-/// The address the app asked the browser to open within a few frames, if any.
-fn url_opened(harness: &mut Harness<'_, FerrisPingApp>) -> Option<String> {
-    (0..4).find_map(|_| {
-        harness.step();
-        harness
-            .output()
-            .platform_output
-            .commands
-            .iter()
-            .find_map(|command| match command {
-                egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
-                _ => None,
-            })
-    })
-}
+/// A point in the window well away from the notice.
+const OUTSIDE_NOTICE: Pos2 = pos2(60.0, 700.0);
 
 #[test]
 fn the_first_run_says_what_ferrisping_sends_before_sending_it() {
@@ -743,7 +733,11 @@ fn the_first_run_says_what_ferrisping_sends_before_sending_it() {
 
     // The whole list is a click away.
     harness.get_by_label("ferrisping.com/#privacy").click();
-    assert_eq!(url_opened(&mut harness).as_deref(), Some(PRIVACY_URL));
+    let opened = output_within(&mut harness, |command| match command {
+        egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+        _ => None,
+    });
+    assert_eq!(opened.as_deref(), Some(PRIVACY_URL));
 
     harness.get_by_label("OK").click();
     harness.run_steps(2);
@@ -781,22 +775,44 @@ fn the_notice_comes_once_and_its_choice_is_kept() {
 }
 
 #[test]
+fn only_ok_answers_the_first_run_notice() {
+    let mut harness = first_run();
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    harness.get_by_label(NOTICE_TITLE);
+    click_at(&harness, OUTSIDE_NOTICE, PointerButton::Primary);
+    harness.run_steps(2);
+    harness.get_by_label(NOTICE_TITLE);
+    assert!(!lookups_on(&harness), "nothing is checked or looked up yet");
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    let saved: Saved = eframe::get_value(&storage, STORAGE_KEY).expect("settings were saved");
+    assert!(!saved.notice_answered, "it comes back next time");
+}
+
+#[test]
 fn a_session_from_the_command_line_starts_without_the_notice() {
     let session = || Args {
         hosts: parse_targets("127.0.0.1"),
         ..Args::default()
     };
-    // Even on the very first run, it starts as it always did.
-    let harness = app_saved(session(), window::SIZE, Saved::default());
+    // Before the notice has ever been answered, a session sends nothing optional
+    // unless it's turned on there.
+    let mut harness = app_saved(session(), window::SIZE, Saved::default());
     assert!(harness.query_by_label(NOTICE_TITLE).is_none());
+    assert!(!lookups_on(&harness));
+    open_more_options(&mut harness);
+    assert!(!lookups_ticked(&harness));
+    harness.get_by_label(LOOKUPS_LABEL).click();
+    harness.run_steps(2);
     assert!(lookups_on(&harness));
-    // And it keeps to the choice made before.
+    // Once it has been answered, a session keeps to the answer.
+    assert!(lookups_on(&app_saved(session(), window::SIZE, answered())));
     let off = Saved {
         network_lookups: false,
         ..answered()
     };
-    let harness = app_saved(session(), window::SIZE, off);
-    assert!(!lookups_on(&harness));
+    assert!(!lookups_on(&app_saved(session(), window::SIZE, off)));
 }
 
 #[test]
@@ -867,23 +883,45 @@ fn with_lookups_off_an_open_route_names_no_networks() {
     );
 
     harness.get_by_label("Copy report").click();
-    let report = text_copied(&mut harness).expect("the report goes to the clipboard");
+    let report = output_within(&mut harness, copied).expect("the report goes to the clipboard");
     assert_eq!(report.matches("lookups off").count(), 2, "{report}");
     assert!(!report.contains("Lumen"), "{report}");
 }
 
 #[test]
 fn the_notice_can_be_read_again_from_the_menu() {
-    let mut harness = app("127.0.0.1");
-    open_more_options(&mut harness);
-    harness.get_by_label("What FerrisPing sends…").click();
-    // A dialog stays hidden for its first frame, while egui measures it.
-    harness.run_steps(4);
-    harness.get_by_label(NOTICE_TITLE);
-    assert!(lookups_ticked(&harness));
-    harness.get_by_label(LOOKUPS_LABEL).click();
+    // A normal run, which saves its settings.
+    let mut harness = app_saved(Args::default(), window::SIZE, answered());
+    // Opens the notice from the menu and unticks the box in it.
+    let reopen = |harness: &mut Harness<'_, FerrisPingApp>| {
+        open_more_options(harness);
+        harness.get_by_label("What FerrisPing sends…").click();
+        // A dialog stays hidden for its first frame, while egui measures it.
+        harness.run_steps(4);
+        harness.get_by_label(NOTICE_TITLE);
+        assert!(lookups_ticked(harness), "the box shows the setting");
+        harness.get_by_label(LOOKUPS_LABEL).click();
+        harness.run_steps(2);
+    };
+
+    reopen(&mut harness);
+    assert!(lookups_on(&harness), "only OK applies the box");
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    let saved: Saved = eframe::get_value(&storage, STORAGE_KEY).expect("settings were saved");
+    assert!(saved.network_lookups, "and it isn't saved either");
+    // Escape and a click outside close it without changing anything.
+    harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
-    assert!(lookups_on(&harness), "the box counts once the notice is closed");
+    assert!(harness.query_by_label(NOTICE_TITLE).is_none());
+    assert!(lookups_on(&harness));
+    reopen(&mut harness);
+    click_at(&harness, OUTSIDE_NOTICE, PointerButton::Primary);
+    harness.run_steps(2);
+    assert!(harness.query_by_label(NOTICE_TITLE).is_none());
+    assert!(lookups_on(&harness));
+
+    reopen(&mut harness);
     harness.get_by_label("OK").click();
     harness.run_steps(2);
     assert!(!lookups_on(&harness));

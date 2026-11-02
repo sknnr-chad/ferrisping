@@ -79,9 +79,11 @@ Nothing else: no telemetry, no update checks, no accounts. Pausing stops the pin
 **Check routes and look up networks**, under More options (⋯) at the top right, turns off the 30-second
 traceroutes and the Team Cymru lookups. Lanes then don't name the network their traffic leaves through, switches
 aren't logged, and an open route says "Lookups off" instead of naming its routers' networks. Router names are still
-looked up. The setting is on unless you turn it off. The first time FerrisPing starts, it shows a summary of this
-list with the same choice, and checks and looks up nothing until you've answered. A one-off session started from
-the command line doesn't ask: it uses the saved choice, or on if there isn't one.
+looked up. The setting is on unless you turn it off.
+
+The first time FerrisPing starts, it shows a summary of this list with the same choice, and doesn't check routes or
+look up networks until you've answered with OK. A one-off session started from the command line doesn't show the
+summary: until it has been answered, a session leaves the setting off unless you turn it on there.
 
 ## Command line
 
