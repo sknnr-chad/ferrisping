@@ -21,13 +21,14 @@ pub fn show(ui: &mut Ui, state: &State, clock: &Clock, p: &Palette) {
     });
     ui.add_space(6.0);
     if state.events.is_empty() {
-        let mut text = "Nothing yet. A host that misses 3 replies in a row is logged here, \
-                        and again when it answers."
-            .to_string();
         // Switches are only found while routes are checked.
-        if state.settings.network_lookups {
-            text.push_str(" So is traffic switching to another ISP.");
-        }
+        let text = if state.settings.network_lookups {
+            "Nothing yet. A host that misses 3 replies in a row is logged here, \
+             and again when it answers. So is traffic switching to another ISP."
+        } else {
+            "Nothing yet. A host that misses 3 replies in a row is logged here, \
+             and again when it answers."
+        };
         ui.label(RichText::new(text).color(p.text_muted));
         return;
     }

@@ -88,6 +88,9 @@ impl Default for Saved {
 struct Notice {
     /// Whether to check routes and look up networks, as ticked in the notice.
     lookups: bool,
+    /// It opened by itself on the first run, so only OK closes it. Read again from
+    /// the menu, it can be closed without changing anything.
+    first_run: bool,
 }
 
 /// The dialog that names a network, while it's open.
@@ -191,17 +194,20 @@ impl FerrisPingApp {
         theme::install(&cc.egui_ctx, theme);
 
         let session = !args.hosts.is_empty();
-        // Until the notice is answered, routes aren't checked and nothing is looked up.
-        // One-off sessions and pictures for docs go on as before, without it.
+        // The notice opens by itself on the first normal run. One-off sessions and
+        // pictures for docs start without it.
         let notice = (!saved.notice_answered && !session && args.screenshot.is_none()).then_some(Notice {
             lookups: saved.network_lookups,
+            first_run: true,
         });
         let interval = args
             .interval
             .unwrap_or(Duration::from_millis(saved.interval_ms).max(MIN_INTERVAL));
         let monitor = Arc::new(Monitor::new(ProbeSettings {
             interval,
-            network_lookups: saved.network_lookups && notice.is_none(),
+            // Until the notice is answered, routes aren't checked and nothing is looked
+            // up, in a one-off session too. Pictures for docs go on as before.
+            network_lookups: saved.network_lookups && (saved.notice_answered || args.screenshot.is_some()),
             ..ProbeSettings::default()
         }));
         let ctx = cc.egui_ctx.clone();
@@ -347,6 +353,7 @@ impl FerrisPingApp {
             if ui.button("What FerrisPing sends…").clicked() {
                 self.notice = Some(Notice {
                     lookups: settings.network_lookups,
+                    first_run: false,
                 });
                 ui.close();
             }
@@ -593,7 +600,7 @@ impl FerrisPingApp {
     }
 
     /// The notice about what FerrisPing sends over the network, while it's open.
-    /// However it's closed, the box ticked in it is the choice.
+    /// Only OK applies the box ticked in it.
     fn notice_dialog(&mut self, ctx: &egui::Context, p: &Palette) {
         let Some(notice) = &mut self.notice else {
             return;
@@ -637,11 +644,14 @@ impl FerrisPingApp {
                 });
             });
         });
-        if ok || modal.should_close() {
+        if ok {
             let lookups = notice.lookups;
             self.notice = None;
             self.notice_answered = true;
             self.monitor.update_settings(|s| s.network_lookups = lookups);
+        } else if modal.should_close() && !notice.first_run {
+            // Escape or a click outside. The first run's notice ignores them: it needs an answer.
+            self.notice = None;
         }
     }
 
@@ -727,8 +737,11 @@ impl eframe::App for FerrisPingApp {
                     bottom: 16,
                 }))
                 .show(ui, |ui| {
-                    let lookups = settings.network_lookups;
-                    let out = route::show(ui, view, host, &state.networks, lookups, &self.clock, p);
+                    let owners = route::Owners {
+                        networks: &state.networks,
+                        lookups: settings.network_lookups,
+                    };
+                    let out = route::show(ui, view, host, owners, &self.clock, p);
                     route_out = Some((room, height, out));
                 });
         }
@@ -806,8 +819,12 @@ impl eframe::App for FerrisPingApp {
                 .user_names()
                 .map(|(asn, name)| (asn, name.to_string()))
                 .collect(),
-            // While the notice is open, what's ticked in it counts, as if it had been closed.
-            network_lookups: self.notice.as_ref().map_or(settings.network_lookups, |n| n.lookups),
+            // Until the first run's notice is answered, lookups are off whatever's ticked
+            // in it, so keep what's ticked for next time.
+            network_lookups: match &self.notice {
+                Some(notice) if notice.first_run => notice.lookups,
+                _ => settings.network_lookups,
+            },
             notice_answered: self.notice_answered,
         };
         drop(state);
