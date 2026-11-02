@@ -8,7 +8,19 @@ license = "MIT"
 publish = false
 
 [dependencies]
-eframe = { version = "0.37.0", features = ["persistence"] }
+# eframe without "default_fonts": FerrisPing draws with Windows' own fonts (see theme.rs),
+# and two of egui's bundled fonts have licenses that aren't OSI-approved, which code signing
+# from SignPath Foundation doesn't allow.
+eframe = { version = "0.37.0", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "links",
+    "persistence",
+    "system_fonts",
+    "wayland",
+    "wgpu",
+    "x11",
+] }
 egui_extras = "0.37.0"
 egui_plot = "0.38.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }

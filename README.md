@@ -34,10 +34,20 @@ FerrisPing is new (version 0.1). It runs on Windows 10 and 11; macOS and Linux a
 
 Download `ferrisping.exe` from [Releases](../../releases) and run it. It keeps your hosts, interval, time window,
 theme and network names in `%APPDATA%\FerrisPing`. Graphs and events are kept in memory only, so they start fresh
-each time.
+each time. To uninstall FerrisPing, delete `ferrisping.exe` and that folder.
 
 The exe isn't code-signed yet, so Windows SmartScreen may warn about it the first time: choose **More info**, then
 **Run anyway**.
+
+## Code signing policy
+
+FerrisPing is applying to [SignPath Foundation](https://signpath.org) for free code signing. Once it's accepted, each
+release will be built from this repository by GitHub Actions and approved for signing by hand.
+
+- Committers and reviewers: [Chad Skinner](https://github.com/sknnr-chad)
+- Approvers: [Chad Skinner](https://github.com/sknnr-chad)
+
+Privacy policy: [What FerrisPing sends over the network](#what-ferrisping-sends-over-the-network)
 
 ## Tracing a route
 
@@ -145,5 +155,5 @@ The crab is drawn in the style of Ferris, the unofficial Rust mascot, which is i
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The libraries and fonts built into the exe have licenses of their own, collected in
+MIT; see [LICENSE](LICENSE). The libraries built into the exe have licenses of their own, collected in
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

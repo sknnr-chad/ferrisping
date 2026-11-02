@@ -191,7 +191,8 @@ fn install_fonts(ctx: &egui::Context) {
             .insert(name.to_string(), Arc::new(FontData::from_owned(bytes)));
     };
 
-    // Text: Segoe UI first, egui's bundled fonts after it as fallbacks.
+    // Text: Segoe UI. For characters it lacks, or if it's missing, eframe's system font
+    // provider finds a font through Windows' own font fallback.
     let mut proportional = fonts
         .families
         .get(&FontFamily::Proportional)

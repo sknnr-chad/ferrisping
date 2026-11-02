@@ -1,6 +1,8 @@
 # What `cargo about` collects for THIRD-PARTY-NOTICES.md: the libraries built into
 # ferrisping.exe, under these licenses only. A new dependency under any other license
-# makes it fail, so it gets looked at before it ships. Regenerate with:
+# makes it fail, so it gets looked at before it ships. Every license here is
+# OSI-approved, as SignPath Foundation requires of every part of a program it signs,
+# so keep it that way. Regenerate with:
 #   cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
 #
 # The clarifications below name the license file for crates whose own file cargo-about
@@ -18,10 +20,7 @@ accepted = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    "CC0-1.0",
     "OFL-1.1",
-    "Ubuntu-font-1.0",
-    "Bitstream-Vera",
 ]
 targets = ["x86_64-pc-windows-msvc"]
 ignore-build-dependencies = true
@@ -30,18 +29,6 @@ ignore-dev-dependencies = true
 # FerrisPing's own crates (publish = false): LICENSE covers them.
 [private]
 ignore = true
-
-# egui's fonts. The crate's license field leaves out the Hack font's, which is MIT for
-# Hack and the Bitstream Vera License for the glyphs it got from Bitstream Vera.
-[epaint_default_fonts.clarify]
-license = "(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0 AND Bitstream-Vera"
-files = [
-    { path = "fonts/emoji-icon-font-mit-license.txt", license = "MIT", checksum = "b9d2c1d909aa149996fd4c91dcb92b2362a04431640c1d200959da94caf8cde1" },
-    { path = "fonts/Hack-Regular.txt", license = "MIT", start = "The work in the Hack project", end = "OTHER DEALINGS IN THE SOFTWARE.", checksum = "0a3a32afbdf4e819812135f5fa523498f3f8abdd5a262fc07bee14dd44b58a24" },
-    { path = "fonts/Hack-Regular.txt", license = "Bitstream-Vera", start = "BITSTREAM VERA LICENSE", checksum = "c3f7268ffd19b6fedc97d1cfb21b11ca81acd238bff23a7923c2ebb5eb131170" },
-    { path = "fonts/OFL.txt", license = "OFL-1.1", checksum = "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2" },
-    { path = "fonts/UFL.txt", license = "Ubuntu-font-1.0", checksum = "2f0015108d68627bd788d313f529c21ff4da2c2c42a5e1f3883acc83480f9002" },
-]
 
 # egui's crates don't ship its license file. Some 0.37.0 crates were published from a
 # commit GitHub doesn't serve, so all of them read it from one that it does.
