@@ -1,6 +1,6 @@
 [package]
 name = "ferrisping"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 description = "Watch latency, packet loss, outages and route changes for several hosts at once"
@@ -25,7 +25,7 @@ egui_extras = "0.37.0"
 egui_plot = "0.38.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 jiff = "0.2.38"
-ferrisping-core = { version = "0.1.0", path = "../ferrisping-core" }
+ferrisping-core = { version = "0.2.0", path = "../ferrisping-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
