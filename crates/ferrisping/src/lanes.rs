@@ -413,7 +413,8 @@ fn exit_label(ui: &mut Ui, host: &Host, exit: &Exit, networks: &Networks, now: f
         ui.label(
             RichText::new(format!(
                 "It's the first public network on the route: usually, but not always, the ISP this \
-                 traffic goes out through. Checked every {}. Right-click the lane to rename this network.",
+                 traffic goes out through. Checked every {} unless the host is down. Right-click the lane \
+                 to rename this network.",
                 format::interval(ferrisping_core::EXIT_CHECK_EVERY)
             ))
             .color(p.text_muted),
