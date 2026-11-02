@@ -83,11 +83,11 @@
         </li>
         <li>
           <h3>The network your traffic leaves through</h3>
-          <p>Each lane names the first public network on its route (&ldquo;via Comcast&rdquo;), checks it every 30 seconds and logs a change. That's handy at a site with two ISPs. You can rename networks to what you call them.</p>
+          <p>Each lane names the first public network on its route (&ldquo;via Comcast&rdquo;), checks it every 30 seconds unless the host is down, and logs a change. That's handy at a site with two ISPs. You can rename networks to what you call them.</p>
         </li>
         <li>
           <h3>Quick to fill</h3>
-          <p>Add names or addresses separated by commas, ranges like <code>10.0.0.1-20</code>, IPv6 addresses, and a label after an address (<code>10.0.0.5 Office edge</code>).</p>
+          <p>Add names or addresses separated by commas, ranges like <code>10.0.0.1-20</code> or <code>10.0.0.1-10.0.0.20</code>, a subnet up to a /24 like <code>10.0.0.0/24</code> (without its network and broadcast addresses), IPv6 addresses, and a label after an address (<code>10.0.0.5 Office edge</code>).</p>
         </li>
         <li>
           <h3>No admin rights, no installer</h3>
@@ -138,7 +138,7 @@
         <h2>What FerrisPing sends over the network</h2>
         <ul class="sends">
           <li>Pings (ICMP echo requests) to each host you add, at the interval you pick: every second unless you change it.</li>
-          <li>For each host, a short traceroute every 30 seconds, up to 12 hops, to find the first public network on its way.</li>
+          <li>For each host that isn't down, a short traceroute every 30 seconds, up to 12 hops, to find the first public network on its way.</li>
           <li>While a route is open, a traceroute to that host every second.</li>
           <li>DNS lookups through your usual DNS server:
             <ul>

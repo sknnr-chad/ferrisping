@@ -1,5 +1,7 @@
 //! Parsing what the user types into the "add host" box.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 /// Which address family to use when a name resolves to both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Family {
@@ -70,14 +72,16 @@ impl TargetSpec {
     }
 }
 
-/// Most hosts a single range like `10.0.0.1-254` may expand to.
+/// Most hosts a single range or block may expand to. A /24 fits, with its 254.
 const MAX_RANGE: usize = 256;
 
 /// Parse the add box: entries are separated by new lines, commas or semicolons.
 ///
 /// Each entry is `host [label words]`. The host may carry an `ipv4:` or `ipv6:`
-/// prefix (MultiPing's syntax), and an IPv4 address may end in a range of its
-/// last octet, like `10.0.0.101-107`.
+/// prefix (MultiPing's syntax). It may also be a range of IPv4 addresses, written
+/// out (`10.0.0.101-10.0.0.107`, as PingInfoView takes it) or by the last octet
+/// (`10.0.0.101-107`), or a block like `10.0.0.0/24`. Those become a host for
+/// each address, without the label.
 pub fn parse_targets(input: &str) -> Vec<TargetSpec> {
     let mut specs = Vec::new();
     for entry in input.split(['\n', '\r', ',', ';']) {
@@ -92,21 +96,28 @@ pub fn parse_targets(input: &str) -> Vec<TargetSpec> {
         if host.is_empty() {
             continue;
         }
-        if let Some(hosts) = expand_range(host) {
-            specs.extend(hosts.into_iter().map(|host| TargetSpec {
+        match expand(host) {
+            Some(Ok(hosts)) => specs.extend(hosts.into_iter().map(|host| TargetSpec {
                 host,
                 label: None,
                 family,
-            }));
-        } else {
-            specs.push(TargetSpec {
+            })),
+            // A range that can't be expanded is kept as typed, and its lane says why
+            // (see `range_problem`).
+            Some(Err(_)) | None => specs.push(TargetSpec {
                 host: host.to_string(),
-                label: label.clone(),
+                label,
                 family,
-            });
+            }),
         }
     }
     specs
+}
+
+/// Why `host`, written as a range or a block, wasn't expanded: it's too big,
+/// backwards, or not one after all. None for anything else.
+pub(crate) fn range_problem(host: &str) -> Option<String> {
+    expand(host)?.err()
 }
 
 fn strip_family(word: &str) -> (Family, &str) {
@@ -120,23 +131,73 @@ fn strip_family(word: &str) -> (Family, &str) {
     }
 }
 
-/// `10.0.0.101-107` -> `10.0.0.101` ... `10.0.0.107`.
-fn expand_range(host: &str) -> Option<Vec<String>> {
+/// The addresses a range or block stands for, or why it can't be expanded. None
+/// when `host` isn't written as one, like `edge-rtr.example.com`.
+///
+/// `10.0.0.101-107` and `10.0.0.101-10.0.0.107` -> `10.0.0.101` ... `10.0.0.107`.
+fn expand(host: &str) -> Option<Result<Vec<String>, String>> {
+    if let Some((addr, prefix)) = host.split_once('/') {
+        return Some(expand_block(addr, prefix));
+    }
     let (start, end) = host.split_once('-')?;
-    let octets: Vec<u8> = start.split('.').map(|o| o.parse().ok()).collect::<Option<Vec<u8>>>()?;
-    if octets.len() != 4 {
-        return None;
+    let start: Ipv4Addr = start.parse().ok()?;
+    let end = match end.parse::<u8>() {
+        Ok(last) => {
+            let [a, b, c, _] = start.octets();
+            Ipv4Addr::new(a, b, c, last)
+        }
+        Err(_) => end.parse().ok()?,
+    };
+    Some(ipv4_range(start.into(), end.into()))
+}
+
+/// `10.0.0.0/24` -> `10.0.0.1` ... `10.0.0.254`: an IPv4 block without its network
+/// and broadcast addresses, unless it's a /31 or a /32. Any address in the block
+/// will do in place of the first.
+fn expand_block(addr: &str, prefix: &str) -> Result<Vec<String>, String> {
+    let not_a_block = || "Not a host name, address or block".to_string();
+    let addr: IpAddr = addr
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse()
+        .map_err(|_| not_a_block())?;
+    let prefix: u32 = prefix.parse().map_err(|_| not_a_block())?;
+    match addr {
+        IpAddr::V4(addr) => {
+            let host_bits = 32u32.checked_sub(prefix).ok_or_else(not_a_block)?;
+            if host_bits > 8 {
+                return Err("Too many addresses: the biggest block is a /24".into());
+            }
+            let first = u32::from(addr) & (u32::MAX << host_bits);
+            let last = first | !(u32::MAX << host_bits);
+            if host_bits < 2 {
+                ipv4_range(first, last)
+            } else {
+                ipv4_range(first + 1, last - 1)
+            }
+        }
+        IpAddr::V6(addr) => {
+            let host_bits = 128u32.checked_sub(prefix).ok_or_else(not_a_block)?;
+            if host_bits > 8 {
+                return Err("Too many addresses: the biggest IPv6 block is a /120".into());
+            }
+            let first = u128::from(addr) & (u128::MAX << host_bits);
+            Ok((0..1u128 << host_bits)
+                .map(|i| Ipv6Addr::from(first + i).to_string())
+                .collect())
+        }
     }
-    let first = octets[3];
-    let last: u8 = end.parse().ok()?;
-    if last < first || (last - first) as usize >= MAX_RANGE {
-        return None;
+}
+
+/// The IPv4 addresses from `first` to `last`, as long as there aren't too many.
+fn ipv4_range(first: u32, last: u32) -> Result<Vec<String>, String> {
+    if last < first {
+        return Err("The range runs backwards".into());
     }
-    Some(
-        (first..=last)
-            .map(|o| format!("{}.{}.{}.{o}", octets[0], octets[1], octets[2]))
-            .collect(),
-    )
+    if (last - first) as usize >= MAX_RANGE {
+        return Err(format!("Too many addresses: a range can have at most {MAX_RANGE}"));
+    }
+    Ok((first..=last).map(|n| Ipv4Addr::from(n).to_string()).collect())
 }
 
 #[cfg(test)]
@@ -198,5 +259,71 @@ mod tests {
         let specs = parse_targets("edge-rtr.example.com, 10.0.0.9-3");
         let hosts: Vec<_> = specs.iter().map(|s| s.host.as_str()).collect();
         assert_eq!(hosts, ["edge-rtr.example.com", "10.0.0.9-3"]);
+        assert_eq!(range_problem("edge-rtr.example.com"), None);
+        assert_eq!(range_problem("10.0.0.9-3").as_deref(), Some("The range runs backwards"));
+    }
+
+    fn hosts(input: &str) -> Vec<String> {
+        parse_targets(input).into_iter().map(|s| s.host).collect()
+    }
+
+    #[test]
+    fn written_out_ranges_expand_across_octets() {
+        assert_eq!(
+            hosts("192.168.0.10-192.168.0.12"),
+            ["192.168.0.10", "192.168.0.11", "192.168.0.12"]
+        );
+        assert_eq!(
+            hosts("10.0.0.254-10.0.1.1"),
+            ["10.0.0.254", "10.0.0.255", "10.0.1.0", "10.0.1.1"]
+        );
+    }
+
+    #[test]
+    fn blocks_leave_out_network_and_broadcast() {
+        let block = hosts("10.1.2.0/24");
+        assert_eq!(block.len(), 254);
+        assert_eq!((block[0].as_str(), block[253].as_str()), ("10.1.2.1", "10.1.2.254"));
+        // Any address in the block stands for it.
+        assert_eq!(hosts("10.1.2.77/30"), ["10.1.2.77", "10.1.2.78"]);
+        assert_eq!(hosts("10.1.2.4/31"), ["10.1.2.4", "10.1.2.5"]);
+        assert_eq!(hosts("10.1.2.9/32"), ["10.1.2.9"]);
+    }
+
+    #[test]
+    fn ipv6_blocks_keep_every_address() {
+        assert_eq!(
+            hosts("2001:db8::/126"),
+            ["2001:db8::", "2001:db8::1", "2001:db8::2", "2001:db8::3"]
+        );
+        assert_eq!(hosts("[2001:db8::5]/128"), ["2001:db8::5"]);
+        assert_eq!(hosts("2001:db8::/120").len(), 256);
+    }
+
+    #[test]
+    fn ranges_and_blocks_drop_the_label() {
+        let specs = parse_targets("10.0.0.0/30 Lab switches, 10.0.1.1 Core");
+        let labels: Vec<_> = specs.iter().map(|s| s.label.as_deref()).collect();
+        assert_eq!(labels, [None, None, Some("Core")]);
+    }
+
+    #[test]
+    fn ranges_and_blocks_that_dont_expand_say_why() {
+        for (input, problem) in [
+            ("10.0.0.0/23", "Too many addresses: the biggest block is a /24"),
+            ("2001:db8::/64", "Too many addresses: the biggest IPv6 block is a /120"),
+            (
+                "10.0.0.0-10.0.1.255",
+                "Too many addresses: a range can have at most 256",
+            ),
+            ("10.0.0.0/33", "Not a host name, address or block"),
+            ("10.0.0/24", "Not a host name, address or block"),
+            ("https://example.com/", "Not a host name, address or block"),
+        ] {
+            let specs = parse_targets(input);
+            assert_eq!(specs.len(), 1, "{input}");
+            assert_eq!(specs[0].host, input);
+            assert_eq!(range_problem(input).as_deref(), Some(problem), "{input}");
+        }
     }
 }

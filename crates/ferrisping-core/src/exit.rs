@@ -1,9 +1,10 @@
 //! Which network each host's traffic leaves through, and when that changes.
 //!
-//! Every half minute each host gets a light, partial traceroute: one probe per hop,
-//! a dozen hops out at most. The first router on a public network marks the way
-//! out: the ISP of a home or office line, or whichever of several circuits BGP
-//! picked. A different network there two rounds in a row counts as a switch.
+//! Every half minute each host that isn't down gets a light, partial traceroute: one
+//! probe per hop, a dozen hops out at most. The first router on a public network
+//! marks the way out: the ISP of a home or office line, or whichever of several
+//! circuits BGP picked. A different network there two rounds in a row counts as a
+//! switch.
 //!
 //! All of this needs network lookups on (see [`ProbeSettings`]); without them no
 //! probes go out, and hosts have no way out.
@@ -16,7 +17,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::engine::{Event, EventKind, HostId, ProbeSettings, Shared};
+use crate::engine::{Event, EventKind, HostId, HostStatus, ProbeSettings, Shared};
 use crate::icmp::{self, EchoStatus};
 use crate::network::{self, Owner};
 use crate::now_secs;
@@ -238,28 +239,45 @@ async fn follow(
             // One host at a time: routers limit how fast they report expired probes,
             // and hosts usually share the first few.
             let _turn = shared.exit_turn.lock().await;
-            let limit = reached.unwrap_or(MAX_HOPS).min(MAX_HOPS);
-            probe(target, limit, s.timeout, s.payload_len).await
-        };
-        reached = round.reached;
-        tracker.record(&round, now_secs());
-
-        let mut routers = Vec::new();
-        for (hop, router) in tracker.routers() {
-            let owner = network::owner_of(shared, router).await;
-            routers.push((hop, router, owner));
-            if !matches!(owner, Some(Owner::Private | Owner::Unannounced)) {
-                break;
+            match takes_turn(shared, id) {
+                None => return false,
+                Some(false) => None,
+                Some(true) => {
+                    let limit = reached.unwrap_or(MAX_HOPS).min(MAX_HOPS);
+                    Some(probe(target, limit, s.timeout, s.payload_len).await)
+                }
             }
-        }
-        if !update(shared, id, &mut tracker, first_network(&routers), now_secs()) {
-            return false;
+        };
+        if let Some(round) = round {
+            reached = round.reached;
+            tracker.record(&round, now_secs());
+
+            let mut routers = Vec::new();
+            for (hop, router) in tracker.routers() {
+                let owner = network::owner_of(shared, router).await;
+                routers.push((hop, router, owner));
+                if !matches!(owner, Some(Owner::Private | Owner::Unannounced)) {
+                    break;
+                }
+            }
+            if !update(shared, id, &mut tracker, first_network(&routers), now_secs()) {
+                return false;
+            }
         }
         tokio::select! {
             _ = tokio::time::sleep_until(started + CHECK_EVERY) => {}
             off = settings.wait_for(|s| !s.network_lookups) => return off.is_ok(),
         }
     }
+}
+
+/// Whether the host takes its turn at checking the way out, or None once it's gone.
+/// A host that's down sits it out: a round to a host that doesn't answer lasts the
+/// whole timeout while every other host waits, so a subnet's unused addresses would
+/// leave the rest checked only every few minutes.
+fn takes_turn(shared: &Shared, id: HostId) -> Option<bool> {
+    let state = shared.read();
+    Some(state.host(id)?.status != HostStatus::Down)
 }
 
 /// Apply a round's result to the host. Returns false once the host is gone.
@@ -455,6 +473,25 @@ mod tests {
         let state = shared.read();
         assert_eq!(state.hosts[0].exit.as_ref().map(|exit| exit.asn), Some(LUMEN));
         assert!(state.events.is_empty(), "no switch is logged");
+    }
+
+    #[test]
+    fn hosts_that_are_down_sit_out_their_turn() {
+        let shared = Shared::new(ProbeSettings::default());
+        let id = HostId(1);
+        shared
+            .write()
+            .hosts
+            .push(Host::new(id, TargetSpec::new("10.0.0.1"), 0.0));
+        for (status, turn) in [
+            (HostStatus::Waiting, true),
+            (HostStatus::Up, true),
+            (HostStatus::Down, false),
+        ] {
+            shared.write().hosts[0].status = status;
+            assert_eq!(takes_turn(&shared, id), Some(turn), "{status:?}");
+        }
+        assert_eq!(takes_turn(&shared, HostId(2)), None, "a host that's gone");
     }
 
     #[test]
