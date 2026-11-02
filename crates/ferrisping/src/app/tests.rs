@@ -285,6 +285,63 @@ fn events_toggle_hides_and_shows_the_feed() {
     assert!(harness.state().show_events);
 }
 
+fn jitter_ticked(harness: &Harness<'_, FerrisPingApp>) -> bool {
+    harness.get_by_label(super::JITTER_LABEL).accesskit_node().toggled() == Some(Toggled::True)
+}
+
+#[test]
+fn jitter_is_off_until_the_menu_turns_it_on() {
+    // A normal run, which saves its settings.
+    let mut harness = app_saved(Args::default(), window::SIZE, answered());
+    assert!(!harness.state().show_jitter, "off by default");
+    open_more_options(&mut harness);
+    assert!(!jitter_ticked(&harness));
+    harness.get_by_label(super::JITTER_LABEL).click();
+    harness.run_steps(2);
+    assert!(harness.state().show_jitter);
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    drop(harness);
+
+    // The next start reads the settings the way every start does.
+    let mut harness = Harness::builder().with_size(window::SIZE).build_eframe(|cc| {
+        cc.storage = Some(&storage);
+        FerrisPingApp::new(cc, Args::default())
+    });
+    harness.run_steps(3);
+    assert!(harness.state().show_jitter, "it's kept");
+    open_more_options(&mut harness);
+    assert!(jitter_ticked(&harness));
+}
+
+#[test]
+fn the_hover_text_has_jitter_while_it_is_on() {
+    let mut harness = app_saved(Args::default(), window::SIZE, answered());
+    // A made-up host that's never probed, whose round trips go 10, 12, 10, 12 ms...
+    let monitor = &harness.state().monitor;
+    monitor.add_for_test(TargetSpec::new("192.0.2.10"));
+    let now = now_secs();
+    monitor.edit_for_test(|state| {
+        let history = &mut state.hosts[0].history;
+        for ago in (1..=90).rev() {
+            let seq = history.push_pending(now - f64::from(ago));
+            let rtt_ms = if ago % 2 == 0 { 10.0 } else { 12.0 };
+            history.complete(seq, Outcome::Reply { rtt_ms });
+        }
+    });
+    harness.run_steps(2);
+    let jitter_shown = |harness: &mut Harness<'_, FerrisPingApp>| {
+        harness.hover_at(graph_point(harness, "192.0.2.10"));
+        harness.run_steps(2);
+        harness.query_by_label_contains("Jitter 2.0 ms").is_some()
+    };
+    assert!(!jitter_shown(&mut harness));
+
+    harness.state_mut().show_jitter = true;
+    harness.run_steps(2);
+    assert!(jitter_shown(&mut harness));
+}
+
 #[test]
 fn trace_route_from_the_lane_menu_then_restart_and_close() {
     let mut harness = app("127.0.0.1");
@@ -1298,4 +1355,75 @@ fn route_to_cloudflare(harness: &mut Harness<'_, FerrisPingApp>) {
     trace.name_for_test(target, "one.one.one.one");
     let host = monitor.read().hosts[1].id;
     harness.state_mut().route = Some(RouteView { host, trace });
+}
+
+/// Renders made-up hosts near and far with jitter on: six full lanes, the same six
+/// compact, the last minute, and three lanes at their tallest, in both themes.
+/// Nothing is probed:
+/// `FERRISPING_RENDER_DIR=<dir> cargo test -p ferrisping -- --ignored render_jitter`
+#[test]
+#[ignore = "writes images; run by hand"]
+fn render_jitter() {
+    let dir = std::path::PathBuf::from(std::env::var("FERRISPING_RENDER_DIR").expect("set FERRISPING_RENDER_DIR"));
+    // Each host's round trip and how much it varies, then how much it varied between
+    // 9 and 6 minutes ago.
+    let hosts = [
+        ("192.0.2.1 Gateway", 0.6, 0.3, 0.3),
+        ("192.0.2.20 File server", 1.8, 0.5, 2.5),
+        ("198.51.100.25 Hosted phones", 28.0, 1.0, 12.0),
+        ("198.51.100.80 Branch office", 45.0, 4.0, 4.0),
+        ("203.0.113.90 Frankfurt VPN", 120.0, 12.0, 12.0),
+        ("203.0.113.40 Sydney office", 150.0, 2.0, 2.0),
+    ];
+    let all: &[usize] = &[0, 1, 2, 3, 4, 5];
+    for (theme, name) in [(ThemeChoice::Dark, "dark"), (ThemeChoice::Light, "light")] {
+        for (lanes, height, window_secs, picked) in [
+            ("full", 800.0, 15 * 60, all),
+            ("compact", 560.0, 15 * 60, all),
+            ("minute", 800.0, 60, all),
+            ("tall", 800.0, 15 * 60, &[0, 2, 5][..]),
+        ] {
+            let mut harness = screenshot_app(theme, window_secs, vec2(1180.0, height));
+            harness.state_mut().show_jitter = true;
+            let monitor = &harness.state().monitor;
+            for &i in picked {
+                monitor.add_for_test(parse_targets(hosts[i].0).remove(0));
+            }
+            let now = now_secs();
+            monitor.edit_for_test(|state| {
+                for (host, &i) in state.hosts.iter_mut().zip(picked) {
+                    let (_, base_ms, spread_ms, burst_ms) = hosts[i];
+                    let mut calm = Jitter::new(i as u64 + 41, base_ms, spread_ms);
+                    let mut rough = Jitter::new(i as u64 + 51, base_ms, burst_ms);
+                    host.addr = host.spec.host.parse().ok();
+                    for ago in (0..15 * 60).rev() {
+                        let seq = host.history.push_pending(now - f64::from(ago) - 0.5);
+                        let jitter = if (360..540).contains(&ago) {
+                            &mut rough
+                        } else {
+                            &mut calm
+                        };
+                        let outcome = Outcome::Reply {
+                            rtt_ms: jitter.next_ms(),
+                        };
+                        host.history.complete(seq, outcome);
+                    }
+                    (host.status, host.status_since) = (HostStatus::Up, now - 3.0 * 3600.0);
+                    host.version += 1;
+                }
+            });
+            harness.run_steps(3);
+            // Point at the hosted phones while their round trips were all over the place,
+            // or at a compact lane's name for its numbers.
+            if lanes == "compact" {
+                harness.hover_at(lane_name(&harness, "Hosted phones").center());
+                harness.run_steps(40);
+            } else {
+                harness.hover_at(graph_point(&harness, "Hosted phones"));
+                harness.run_steps(3);
+            }
+            let file = dir.join(format!("jitter-{lanes}-{name}.png"));
+            harness.render().unwrap().save(file).unwrap();
+        }
+    }
 }

@@ -1,5 +1,7 @@
-//! Turns a host's history into what a lane draws: decimated line runs,
-//! packet-loss bands, the latency scale and the time grid.
+//! Turns a host's history into what a lane draws: decimated line runs, the
+//! jitter line, packet-loss bands, the latency scale and the time grid.
+
+use std::collections::VecDeque;
 
 use egui_plot::GridMark;
 use ferrisping_core::{History, Outcome, Sample};
@@ -15,6 +17,9 @@ const LABEL_SPACING: f64 = 110.0;
 const MINOR_SPACING: f64 = 24.0;
 /// Never return more marks than this, whatever the zoom.
 const MAX_MARKS: i64 = 2_000;
+/// The jitter line averages at least this many changes between replies, so it
+/// reads as a trend instead of a spike per reply.
+const JITTER_REPLIES: usize = 10;
 
 fn step_at_least(secs: f64) -> f64 {
     TIME_STEPS
@@ -115,6 +120,9 @@ pub fn latency_tick(value: f64) -> String {
 pub struct Series {
     /// Unbroken stretches of replies as `[time, ms]`, at most two points per bucket.
     pub runs: Vec<Vec<[f64; 2]>>,
+    /// Unbroken stretches of the jitter line as `[time, ms]`, at most one point per
+    /// bucket. Empty unless asked for.
+    pub jitter: Vec<Vec<[f64; 2]>>,
     /// Time ranges where probes were lost.
     pub losses: Vec<(f64, f64)>,
     /// Highest round trip inside the range.
@@ -159,23 +167,149 @@ impl Bucket {
     }
 }
 
-/// Build the drawable series for `[t0, t1]`, decimated to `buckets` columns.
+/// The jitter line, built a sample at a time. Its measure is the lane's Jitter
+/// number, the mean change between consecutive replies, taken over the latest
+/// `JITTER_REPLIES` changes, or over a bucket's own changes when it has more.
+///
+/// It breaks where the round trips' line does. A lost probe doesn't start the
+/// average over, as it doesn't for the number; a long gap does. Its buckets are
+/// aligned to the clock rather than to the range, so the line holds still while
+/// a live graph slides along.
+struct JitterLine {
+    bucket_secs: f64,
+    gap_limit: f64,
+    /// When the last finished probe was sent.
+    last_t: Option<f64>,
+    /// The last reply's round trip.
+    last_ms: Option<f32>,
+    /// The latest changes between replies, oldest first.
+    recent: VecDeque<f32>,
+    bucket: Option<JitterBucket>,
+    run: Vec<[f64; 2]>,
+    runs: Vec<Vec<[f64; 2]>>,
+}
+
+/// The changes between replies in one bucket.
+struct JitterBucket {
+    index: i64,
+    sum: f64,
+    count: usize,
+    /// When the last of them came, which is where the line's point goes.
+    t: f64,
+}
+
+impl JitterLine {
+    fn new(bucket_secs: f64, gap_limit: f64) -> Self {
+        Self {
+            bucket_secs,
+            gap_limit,
+            last_t: None,
+            last_ms: None,
+            recent: VecDeque::with_capacity(JITTER_REPLIES),
+            bucket: None,
+            run: Vec::new(),
+            runs: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, sample: &Sample) {
+        if sample.outcome == Outcome::Pending {
+            return;
+        }
+        if self.last_t.is_some_and(|prev| sample.t - prev > self.gap_limit) {
+            self.end_run();
+            self.last_ms = None;
+            self.recent.clear();
+        }
+        self.last_t = Some(sample.t);
+        match sample.rtt_ms() {
+            Some(rtt_ms) => self.reply(sample.t, rtt_ms),
+            None => self.end_run(),
+        }
+    }
+
+    fn reply(&mut self, t: f64, rtt_ms: f32) {
+        let index = (t / self.bucket_secs).floor() as i64;
+        if self.bucket.as_ref().is_some_and(|bucket| bucket.index != index) {
+            self.emit();
+        }
+        let Some(last_ms) = self.last_ms.replace(rtt_ms) else {
+            return;
+        };
+        let change = (rtt_ms - last_ms).abs();
+        if self.recent.len() == JITTER_REPLIES {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(change);
+        let bucket = self.bucket.get_or_insert(JitterBucket {
+            index,
+            sum: 0.0,
+            count: 0,
+            t,
+        });
+        bucket.sum += change as f64;
+        bucket.count += 1;
+        bucket.t = t;
+    }
+
+    /// Put the bucket being filled on the line.
+    fn emit(&mut self) {
+        let Some(bucket) = self.bucket.take() else {
+            return;
+        };
+        let ms = if bucket.count >= JITTER_REPLIES {
+            bucket.sum / bucket.count as f64
+        } else {
+            self.recent.iter().map(|&change| change as f64).sum::<f64>() / self.recent.len() as f64
+        };
+        self.run.push([bucket.t, ms]);
+    }
+
+    fn end_run(&mut self) {
+        self.emit();
+        if !self.run.is_empty() {
+            self.runs.push(std::mem::take(&mut self.run));
+        }
+    }
+
+    fn finish(mut self) -> Vec<Vec<[f64; 2]>> {
+        self.end_run();
+        self.runs
+    }
+}
+
+/// Build the drawable series for `[t0, t1]`, decimated to `buckets` columns, with
+/// the jitter line if `jitter` is set.
 ///
 /// `interval` is the current probe interval, used to size the band for a trailing
 /// loss and to break lines across long gaps (pauses, sleep).
-pub fn build(history: &History, t0: f64, t1: f64, buckets: usize, interval: f64) -> Series {
+pub fn build(history: &History, t0: f64, t1: f64, buckets: usize, interval: f64, jitter: bool) -> Series {
     let bucket_secs = ((t1 - t0) / buckets.max(1) as f64).max(1e-9);
     let gap_limit = (interval * 5.0).max(10.0);
     let mut series = Series::default();
     let mut run: Vec<[f64; 2]> = Vec::new();
     let mut bucket: Option<Bucket> = None;
+    let mut jitter_line = jitter.then(|| JitterLine::new(bucket_secs, gap_limit));
     let mut last_t: Option<f64> = None;
     let mut loss_start: Option<f64> = None;
     let mut last_loss = 0.0;
 
     // Reach one probe past each edge so lines continue off the visible range.
     let margin = interval.max(bucket_secs);
-    for sample in history.range(t0 - margin, t1 + margin) {
+    // The jitter line starts further back, so that its first points average as
+    // many replies as the rest, wherever the range starts.
+    let warm_up = if jitter {
+        (JITTER_REPLIES + 2) as f64 * interval + bucket_secs
+    } else {
+        0.0
+    };
+    for sample in history.range(t0 - margin - warm_up, t1 + margin) {
+        if let Some(line) = &mut jitter_line {
+            line.add(sample);
+        }
+        if sample.t < t0 - margin {
+            continue;
+        }
         match sample.outcome {
             Outcome::Pending => continue,
             Outcome::Lost(_) => {
@@ -209,6 +343,9 @@ pub fn build(history: &History, t0: f64, t1: f64, buckets: usize, interval: f64)
         last_t = Some(sample.t);
     }
     end_run(&mut run, &mut bucket, &mut series.runs);
+    if let Some(line) = jitter_line {
+        series.jitter = line.finish();
+    }
     if let Some(start) = loss_start {
         series.losses.push((start, last_loss + interval));
     }
@@ -248,6 +385,26 @@ pub fn nearest(history: &History, t: f64, max_dt: f64) -> Option<Sample> {
         .copied()
 }
 
+/// The jitter line's point closest to `t`, if one lies within `max_dt` seconds.
+pub fn jitter_near(jitter: &[Vec<[f64; 2]>], t: f64, max_dt: f64) -> Option<f32> {
+    jitter
+        .iter()
+        .flatten()
+        .filter(|[at, _]| (at - t).abs() <= max_dt)
+        .min_by(|a, b| (a[0] - t).abs().total_cmp(&(b[0] - t).abs()))
+        .map(|&[_, ms]| ms as f32)
+}
+
+/// The jitter line's highest point between `t0` and `t1`, for the strip's scale.
+pub fn jitter_max(jitter: &[Vec<[f64; 2]>], t0: f64, t1: f64) -> f32 {
+    jitter
+        .iter()
+        .flatten()
+        .filter(|[at, _]| (t0..=t1).contains(at))
+        .map(|&[_, ms]| ms as f32)
+        .fold(0.0, f32::max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,7 +433,7 @@ mod tests {
             (5.0, Some(11.0)),
             (6.0, Some(13.0)),
         ]);
-        let s = build(&h, 0.0, 10.0, 1000, 1.0);
+        let s = build(&h, 0.0, 10.0, 1000, 1.0, false);
         assert_eq!(s.runs.len(), 2);
         assert_eq!(s.runs[0], vec![[1.0, 10.0], [2.0, 12.0]]);
         assert_eq!(s.losses, vec![(3.0, 5.0)]);
@@ -286,14 +443,14 @@ mod tests {
     #[test]
     fn trailing_loss_extends_one_interval() {
         let h = history(&[(1.0, Some(10.0)), (2.0, None)]);
-        let s = build(&h, 0.0, 10.0, 1000, 1.0);
+        let s = build(&h, 0.0, 10.0, 1000, 1.0, false);
         assert_eq!(s.losses, vec![(2.0, 3.0)]);
     }
 
     #[test]
     fn dense_samples_keep_min_and_max_per_bucket() {
         let samples: Vec<_> = (0..100).map(|i| (i as f64 * 0.01, Some((i % 7) as f32))).collect();
-        let s = build(&history(&samples), 0.0, 1.0, 2, 0.01);
+        let s = build(&history(&samples), 0.0, 1.0, 2, 0.01, false);
         let points: usize = s.runs.iter().map(Vec::len).sum();
         assert!(points <= 4, "{points} points");
         assert_eq!(s.max_ms, 6.0);
@@ -307,16 +464,132 @@ mod tests {
             (100.0, Some(10.0)),
             (101.0, Some(10.0)),
         ]);
-        let s = build(&h, 0.0, 200.0, 1000, 1.0);
+        let s = build(&h, 0.0, 200.0, 1000, 1.0, false);
         assert_eq!(s.runs.len(), 2);
     }
 
     #[test]
     fn single_losses_stay_visible_when_zoomed_out() {
         let h = history(&[(1.0, Some(10.0)), (2.0, None), (2.001, Some(10.0))]);
-        let s = build(&h, 0.0, 1000.0, 100, 1.0);
+        let s = build(&h, 0.0, 1000.0, 100, 1.0, false);
         assert_eq!(s.losses.len(), 1);
         assert!(s.losses[0].1 - s.losses[0].0 >= 15.0);
+    }
+
+    #[test]
+    fn jitter_is_the_mean_change_between_replies() {
+        // Changes of 2, 2, 4 and 4 ms: fewer than the line averages, so each point
+        // averages all of them so far, and the last is the lane's Jitter number.
+        let h = history(&[
+            (1.0, Some(10.0)),
+            (2.0, Some(12.0)),
+            (3.0, Some(10.0)),
+            (4.0, Some(14.0)),
+            (5.0, Some(10.0)),
+        ]);
+        let s = build(&h, 0.0, 10.0, 1000, 1.0, true);
+        assert_eq!(s.jitter, [[[2.0, 2.0], [3.0, 2.0], [4.0, 8.0 / 3.0], [5.0, 3.0]]]);
+        assert_eq!(h.stats(0.0, 10.0).jitter_ms, Some(3.0));
+        assert!(build(&h, 0.0, 10.0, 1000, 1.0, false).jitter.is_empty());
+    }
+
+    #[test]
+    fn jitter_averages_the_latest_replies() {
+        // Twenty changes of 10 ms, then steady replies: the line comes back down
+        // over as many replies as it averages.
+        let samples: Vec<_> = (0..40)
+            .map(|i| (i as f64, Some(if i <= 20 && i % 2 == 1 { 20.0 } else { 10.0 })))
+            .collect();
+        let s = build(&history(&samples), 0.0, 40.0, 1000, 1.0, true);
+        let at = |t: f64| s.jitter[0].iter().find(|point| point[0] == t).map(|point| point[1]);
+        assert_eq!(at(20.0), Some(10.0));
+        assert_eq!(at(25.0), Some(5.0));
+        assert_eq!(at(30.0), Some(0.0));
+    }
+
+    #[test]
+    fn jitter_breaks_where_the_round_trips_do() {
+        let h = history(&[
+            (1.0, Some(10.0)),
+            (2.0, Some(20.0)),
+            (3.0, None),
+            (4.0, Some(14.0)),
+            (5.0, Some(14.0)),
+            (100.0, Some(50.0)),
+            (101.0, Some(51.0)),
+        ]);
+        let s = build(&h, 0.0, 200.0, 1000, 1.0, true);
+        assert_eq!(s.runs.len(), 3);
+        // The change across the loss counts, as it does for the lane's number, but
+        // nothing compares the replies either side of the long gap.
+        let lines = [
+            vec![[2.0, 10.0]],
+            vec![[4.0, 8.0], [5.0, 16.0 / 3.0]],
+            vec![[101.0, 1.0]],
+        ];
+        assert_eq!(s.jitter, lines);
+        assert_eq!(h.stats(0.0, 6.0).jitter_ms, Some(16.0 / 3.0));
+    }
+
+    #[test]
+    fn zoomed_out_jitter_averages_each_bucket() {
+        // A hundred replies a bucket, changing by 1 ms each time for five buckets and
+        // then not at all.
+        let samples: Vec<_> = (0..1000)
+            .map(|i| {
+                (
+                    i as f64 / 100.0,
+                    Some(if i < 500 { 10.0 + (i % 2) as f32 } else { 10.0 }),
+                )
+            })
+            .collect();
+        let s = build(&history(&samples), 0.0, 10.0, 10, 0.01, true);
+        assert_eq!(s.jitter.len(), 1);
+        let values: Vec<f64> = s.jitter[0].iter().map(|point| point[1]).collect();
+        assert_eq!(values.len(), 10, "one point a bucket");
+        assert!(values[..5].iter().all(|&ms| ms == 1.0), "{values:?}");
+        assert!(values[6..].iter().all(|&ms| ms == 0.0), "{values:?}");
+    }
+
+    #[test]
+    fn the_jitter_line_holds_still_while_the_range_slides() {
+        // Round trips that wander, two probes a second.
+        let samples: Vec<_> = (0..6000)
+            .map(|i| (i as f64 / 2.0 + 0.123, Some(10.0 + (i * 7 % 11) as f32)))
+            .collect();
+        let h = history(&samples);
+        // A minute has a reply or so a bucket, and 1000 seconds have 20.
+        for secs in [60.0, 1000.0] {
+            // The points inside both ranges, a few seconds apart as a live graph moves on.
+            let line = |t0: f64| {
+                let s = build(&h, t0, t0 + secs, 100, 0.5, true);
+                let inside = |point: &[f64; 2]| (1003.7..1000.0 + secs).contains(&point[0]);
+                s.jitter.concat().into_iter().filter(inside).collect::<Vec<_>>()
+            };
+            assert!(line(1000.0).len() >= 10);
+            assert_eq!(line(1000.0), line(1003.7), "{secs} s");
+        }
+        // The round trips' line is the same with it or without.
+        let (on, off) = (
+            build(&h, 1000.0, 1060.0, 100, 0.5, true),
+            build(&h, 1000.0, 1060.0, 100, 0.5, false),
+        );
+        assert_eq!((on.runs, on.losses, on.max_ms), (off.runs, off.losses, off.max_ms));
+    }
+
+    #[test]
+    fn hover_finds_the_nearest_jitter_point() {
+        let jitter = [vec![[1.0, 2.0], [2.0, 3.0]], vec![[5.0, 4.0]]];
+        assert_eq!(jitter_near(&jitter, 1.9, 0.5), Some(3.0));
+        assert_eq!(jitter_near(&jitter, 4.8, 0.5), Some(4.0));
+        assert_eq!(jitter_near(&jitter, 3.5, 0.5), None);
+    }
+
+    #[test]
+    fn the_jitter_scale_fits_the_line_in_view() {
+        let jitter = [vec![[1.0, 9.0], [2.0, 3.0]], vec![[5.0, 4.0], [7.0, 8.0]]];
+        assert_eq!(jitter_max(&jitter, 1.5, 6.0), 4.0, "points out of view don't count");
+        assert_eq!(jitter_max(&[], 0.0, 10.0), 0.0);
     }
 
     #[test]

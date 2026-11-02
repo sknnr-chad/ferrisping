@@ -29,6 +29,9 @@ FerrisPing is new (version 0.2). It runs on Windows 10 and 11; macOS and Linux a
   label after an address (`10.0.0.5 Office edge`).
 - **No admin rights, no installer**: one .exe that pings with the same Windows ICMP API as `ping.exe` and
   `tracert.exe`.
+- **Jitter strips**: turn on **Show jitter under graphs**, in More options (⋯), for a strip under each graph with
+  jitter: how much the round trip changes from one reply to the next, on a scale of its own. With many hosts, lanes
+  are too short for it, and hovering a graph shows jitter instead.
 - Light and dark themes, or follow Windows.
 
 ## Install
