@@ -63,6 +63,8 @@ pub enum LaneAction {
     Move(HostId, usize),
     Copy(String),
     TraceRoute(HostId),
+    /// Give the host a name of the user's choosing.
+    Rename(HostId),
     /// Give a network (by AS number) a name of the user's choosing.
     RenameNetwork(u32),
 }
@@ -227,11 +229,13 @@ fn info(
     // being taken by a text selection.
     ui.style_mut().interaction.selectable_labels = false;
 
-    // Name, with the latest round trip on the right. A compact lane has no room
-    // for the numbers, so the name's tooltip has them.
+    // Name and address, with the latest round trip on the right, far enough off that
+    // the two numbers don't run together. A compact lane has no room for the other
+    // numbers, so the name's tooltip has them.
     let (name_size, ms_size) = if compact { (14.0, 15.0) } else { (15.0, 19.0) };
     egui::Sides::new()
         .height(if compact { 20.0 } else { 24.0 })
+        .spacing(16.0)
         .shrink_left()
         .truncate()
         .show(
@@ -239,10 +243,7 @@ fn info(
             |ui| {
                 let (icon, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
                 theme::paint_status_icon(ui.painter(), icon.center(), 11.0, host.status, p);
-                let name = RichText::new(host.name())
-                    .font(theme::font_semibold(name_size))
-                    .color(p.text);
-                let name = ui.add(Label::new(name).truncate());
+                let name = name_and_address(ui, host, name_size, p);
                 if compact {
                     name.on_hover_ui(|ui| {
                         ui.label(full_name(host));
@@ -275,9 +276,8 @@ fn info(
             },
         );
 
-    // Status, the network the traffic leaves through and the address, with buttons
-    // while the pointer is over the lane. The address goes last, and only whole: it's
-    // in the name's tooltip too, and a cut-off address says nothing.
+    // Status and the network the traffic leaves through, with buttons while the
+    // pointer is over the lane.
     egui::Sides::new().height(18.0).shrink_left().truncate().show(
         &mut ui,
         |ui| {
@@ -288,18 +288,6 @@ fn info(
             if let Some(exit) = &host.exit {
                 ui.add(Label::new(line("  ·  ".into())));
                 exit_label(ui, host, exit, networks, now, clock, p);
-            }
-            if let Some(addr) = host.addr.map(|a| a.to_string()).filter(|a| *a != host.name()) {
-                let text = egui::WidgetText::from(line(format!("  ·  {addr}")));
-                let galley = text.into_galley(
-                    ui,
-                    Some(egui::TextWrapMode::Truncate),
-                    ui.available_width(),
-                    egui::FontSelection::Default,
-                );
-                if !galley.elided {
-                    ui.add(Label::new(galley));
-                }
             }
         },
         |ui| {
@@ -373,6 +361,37 @@ fn numbers(ui: &mut Ui, id: impl egui::AsIdSalt, stats: &WindowStats, p: &Palett
             }
             ui.end_row();
         });
+}
+
+/// The host's name, and its address beside it in muted text when that's something
+/// else. The name is cut short to fit the address, which shows whole or not at all:
+/// a cut-off address says nothing, and the name's tooltip has it anyway.
+fn name_and_address(ui: &mut Ui, host: &Host, size: f32, p: &Palette) -> Response {
+    let name = RichText::new(host.name())
+        .font(theme::font_semibold(size))
+        .color(p.text);
+    let address = host.address();
+    if address == host.name() {
+        return ui.add(Label::new(name).truncate());
+    }
+    let address = egui::WidgetText::from(RichText::new(address).size(13.0).color(p.text_muted)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::FontSelection::Default,
+    );
+    let room = ui.available_width() - ui.spacing().item_spacing.x - address.size().x;
+    let cut = egui::WidgetText::from(name.clone()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        room.max(0.0),
+        egui::FontSelection::Default,
+    );
+    if cut.elided && room < theme::NAME_MIN_WIDTH {
+        return ui.add(Label::new(name).truncate());
+    }
+    let name = ui.add(Label::new(cut));
+    name.union(ui.add(Label::new(address)))
 }
 
 fn full_name(host: &Host) -> String {
@@ -779,10 +798,15 @@ fn lane_menu(response: &Response, host: &Host, networks: &Networks, index: usize
             ui.close();
         }
         ui.separator();
-        let address = host
-            .addr
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| host.spec.host.clone());
+        if ui
+            .button("Rename…")
+            .on_hover_text("Give this host a name of your own. Its address stays beside the name.")
+            .clicked()
+        {
+            out.actions.push(LaneAction::Rename(host.id));
+            ui.close();
+        }
+        let address = host.address();
         if ui.button(format!("Copy {address}")).clicked() {
             out.actions.push(LaneAction::Copy(address));
             ui.close();

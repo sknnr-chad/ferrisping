@@ -54,6 +54,22 @@ impl TargetSpec {
             None => format!("{prefix}{}", self.host),
         }
     }
+
+    /// Reads back what [`to_input`](Self::to_input) wrote. Unlike the add box, it
+    /// takes the whole line as one host, so a label given later may have commas.
+    pub fn from_input(input: &str) -> Option<TargetSpec> {
+        let mut words = input.split_whitespace();
+        let (family, host) = strip_family(words.next()?);
+        if host.is_empty() {
+            return None;
+        }
+        let label = words.collect::<Vec<_>>().join(" ");
+        Some(TargetSpec {
+            host: host.to_string(),
+            label: (!label.is_empty()).then_some(label),
+            family,
+        })
+    }
 }
 
 /// Most hosts a single range or block may expand to. A /24 fits, with its 254.
@@ -212,6 +228,23 @@ mod tests {
             (Family::V4, "www.akamai.com")
         );
         assert_eq!(specs[0].to_input(), "ipv6:google.com");
+    }
+
+    #[test]
+    fn hosts_written_out_read_back_the_same() {
+        let labeled = TargetSpec {
+            label: Some("Gateway, 2nd floor; east".into()),
+            ..TargetSpec::new("10.0.0.5")
+        };
+        let v6 = TargetSpec {
+            family: Family::V6,
+            ..TargetSpec::new("esx01")
+        };
+        for spec in [TargetSpec::new("10.0.0.5"), labeled, v6] {
+            assert_eq!(TargetSpec::from_input(&spec.to_input()), Some(spec));
+        }
+        assert_eq!(TargetSpec::from_input("  "), None);
+        assert_eq!(TargetSpec::from_input("ipv4:"), None);
     }
 
     #[test]

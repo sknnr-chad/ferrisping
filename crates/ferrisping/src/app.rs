@@ -10,7 +10,9 @@ use eframe::egui::{
     self, Align, Button, Color32, ComboBox, CornerRadius, Frame, Key, Layout, Margin, RichText, Stroke, TextEdit, Ui,
     vec2,
 };
-use ferrisping_core::{HostStatus, Monitor, ProbeSettings, State, TargetSpec, TraceSettings, now_secs, parse_targets};
+use ferrisping_core::{
+    HostId, HostStatus, Monitor, ProbeSettings, State, TargetSpec, TraceSettings, now_secs, parse_targets,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::args::Args;
@@ -98,16 +100,22 @@ struct Notice {
     first_run: bool,
 }
 
-/// The dialog that names a network, while it's open.
+/// The dialog that names a network or a host, while it's open.
 struct Rename {
-    asn: u32,
-    /// What the registry calls it, shown for reference.
-    registered: Option<String>,
+    what: Renaming,
     text: String,
     /// The user named it before, so it can go back to its usual name.
     renamed: bool,
     /// Not drawn yet: focus the name and select it on the first frame.
     fresh: bool,
+}
+
+/// What the rename dialog names.
+enum Renaming {
+    /// A network by AS number, with what the registry calls it, shown for reference.
+    Network { asn: u32, registered: Option<String> },
+    /// A host, with its address, shown for reference.
+    Host { id: HostId, address: String },
 }
 
 /// The crab at two sizes: the renderer can't shrink one image far without shimmer.
@@ -230,7 +238,7 @@ impl FerrisPingApp {
         let hosts = if session {
             args.hosts.clone()
         } else {
-            saved.hosts.iter().flat_map(|h| parse_targets(h)).collect()
+            saved.hosts.iter().filter_map(|h| TargetSpec::from_input(h)).collect()
         };
         add_hosts(&monitor, hosts);
 
@@ -508,12 +516,29 @@ impl FerrisPingApp {
                     }
                 }
                 Action::Route(RouteAction::Watch(addr)) => add_hosts(&self.monitor, parse_targets(&addr)),
+                Action::Lane(LaneAction::Rename(id)) => {
+                    let state = self.monitor.read();
+                    let Some(host) = state.host(id) else { continue };
+                    // The host as it was added, and the address it resolved to.
+                    let mut address = host.spec.host.clone();
+                    if let Some(addr) = host.addr.map(|addr| addr.to_string()).filter(|addr| *addr != address) {
+                        address = format!("{address}  ·  {addr}");
+                    }
+                    self.rename = Some(Rename {
+                        what: Renaming::Host { id, address },
+                        text: host.spec.label.clone().unwrap_or_default(),
+                        renamed: host.spec.label.is_some(),
+                        fresh: true,
+                    });
+                }
                 Action::Lane(LaneAction::RenameNetwork(asn)) | Action::Route(RouteAction::RenameNetwork(asn)) => {
                     let state = self.monitor.read();
                     let networks = &state.networks;
                     self.rename = Some(Rename {
-                        asn,
-                        registered: networks.info(asn).map(|info| info.registered.clone()),
+                        what: Renaming::Network {
+                            asn,
+                            registered: networks.info(asn).map(|info| info.registered.clone()),
+                        },
                         text: networks.name(asn),
                         renamed: networks.user_name(asn).is_some(),
                         fresh: true,
@@ -538,7 +563,7 @@ impl FerrisPingApp {
         }
     }
 
-    /// The dialog that names a network, while it's open.
+    /// The dialog that names a network or a host, while it's open.
     fn rename_dialog(&mut self, ctx: &egui::Context, p: &Palette) {
         let Some(rename) = &mut self.rename else {
             return;
@@ -546,17 +571,30 @@ impl FerrisPingApp {
         // Some(name) sets the name; Some(None) goes back to the usual one.
         let mut chosen: Option<Option<String>> = None;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::unique("rename-network")).show(ctx, |ui| {
+        let (title, record, field_name, note, usual, usual_tip) = match &rename.what {
+            Renaming::Network { asn, registered } => (
+                "Name this network",
+                match registered {
+                    Some(registered) => format!("AS{asn}  ·  {registered}"),
+                    None => format!("AS{asn}"),
+                },
+                "Network name",
+                "Networks with the same name count as one ISP, so FerrisPing doesn't report a switch between them.",
+                "Use its usual name",
+                "Go back to the name FerrisPing knows it by, or the registry's",
+            ),
+            Renaming::Host { address, .. } => (
+                "Name this host",
+                address.clone(),
+                "Host name",
+                "Its address shows beside the name. Events already logged keep the name they have.",
+                "Use its address",
+                "Show this host by its address again",
+            ),
+        };
+        let modal = egui::Modal::new(egui::Id::unique("rename")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.label(
-                RichText::new("Name this network")
-                    .font(theme::font_semibold(17.0))
-                    .color(p.text),
-            );
-            let record = match &rename.registered {
-                Some(registered) => format!("AS{}  ·  {registered}", rename.asn),
-                None => format!("AS{}", rename.asn),
-            };
+            ui.label(RichText::new(title).font(theme::font_semibold(17.0)).color(p.text));
             ui.label(RichText::new(record).size(12.5).color(p.text_muted));
             ui.add_space(6.0);
             let mut edit = TextEdit::singleline(&mut rename.text)
@@ -574,17 +612,10 @@ impl FerrisPingApp {
                 edit.state.cursor.set_char_range(Some(all));
                 edit.state.store(ui.ctx(), edit.response.id);
             }
-            let field = egui::Response::clone(&edit.response).accessible_name("Network name");
+            let field = egui::Response::clone(&edit.response).accessible_name(field_name);
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
             ui.add_space(2.0);
-            ui.label(
-                RichText::new(
-                    "Networks with the same name count as one ISP, so FerrisPing doesn't \
-                     report a switch between them.",
-                )
-                .size(12.5)
-                .color(p.text_secondary),
-            );
+            ui.label(RichText::new(note).size(12.5).color(p.text_secondary));
             ui.add_space(10.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(accent_button(p, "Save")).clicked() || entered {
@@ -593,19 +624,17 @@ impl FerrisPingApp {
                 if ui.button("Cancel").clicked() {
                     cancel = true;
                 }
-                if rename.renamed
-                    && ui
-                        .button("Use its usual name")
-                        .on_hover_text("Go back to the name FerrisPing knows it by, or the registry's")
-                        .clicked()
-                {
+                if rename.renamed && ui.button(usual).on_hover_text(usual_tip).clicked() {
                     chosen = Some(None);
                 }
             });
         });
         let close = cancel || chosen.is_some() || modal.should_close();
         if let Some(name) = chosen {
-            self.monitor.set_network_name(rename.asn, name);
+            match rename.what {
+                Renaming::Network { asn, .. } => self.monitor.set_network_name(asn, name),
+                Renaming::Host { id, .. } => self.monitor.set_label(id, name),
+            }
         }
         if close {
             self.rename = None;

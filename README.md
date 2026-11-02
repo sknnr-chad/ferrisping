@@ -17,6 +17,8 @@ FerrisPing is new (version 0.2). It runs on Windows 10 and 11; macOS and Linux a
 
 - **A lane per host**: the current round trip, average, minimum, maximum, jitter and loss, with a graph of the last
   minute up to the last 24 hours. Drag or zoom a graph to look back, and double-click it to go back to live.
+- **Names of your own**: give a host a name when you add it, or later by right-clicking its lane and choosing
+  **Rename…**, which keeps its graph. Its address shows beside the name, in the lane and in the events list.
 - **Outages logged**: a host that misses 3 replies in a row is marked down. The events list notes when it went
   down, when it came back and how long it was out.
 - **Continuous traceroute**: every hop on the way to a host, measured again and again (like mtr or pathping), so

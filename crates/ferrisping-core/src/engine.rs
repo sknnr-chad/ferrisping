@@ -130,6 +130,12 @@ impl Host {
         self.spec.display_name()
     }
 
+    /// The address it's pinged at, once that's known; until then, the host as typed.
+    pub fn address(&self) -> String {
+        self.addr
+            .map_or_else(|| self.spec.host.clone(), |addr| addr.to_string())
+    }
+
     /// Update up/down state with one finished sample, returning an event on a change.
     fn observe(&mut self, sample: &Sample, down_after: u32) -> Option<EventKind> {
         match sample.outcome {
@@ -182,7 +188,10 @@ pub enum EventKind {
 pub struct Event {
     pub at: f64,
     pub host: HostId,
+    /// The host's name when this was logged. Renaming the host doesn't change it.
     pub host_name: String,
+    /// The host's [address](Host::address) when this was logged.
+    pub host_address: String,
     pub kind: EventKind,
 }
 
@@ -367,10 +376,12 @@ impl Shared {
         if first_failure {
             host.status_since = now;
             let host_name = host.name().to_string();
+            let host_address = host.address();
             state.push_event(Event {
                 at: now,
                 host: id,
                 host_name,
+                host_address,
                 kind: EventKind::ResolveFailed(error),
             });
         }
@@ -424,6 +435,7 @@ impl Shared {
                     at,
                     host: id,
                     host_name: host.name().to_string(),
+                    host_address: host.address(),
                     kind,
                 });
             }
@@ -579,6 +591,20 @@ impl Monitor {
             task.abort();
         }
         self.shared.write().hosts.retain(|h| h.id != id);
+        self.shared.notify();
+    }
+
+    /// Show `label` for a host instead of its address, or the address again with
+    /// `None`. Spaces are tidied as in the add box. The host keeps its samples, and
+    /// events already logged keep the name they have.
+    pub fn set_label(&self, id: HostId, label: Option<String>) {
+        let label = label
+            .map(|label| label.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|label| !label.is_empty());
+        if let Some(host) = self.shared.write().host_mut(id) {
+            host.spec.label = label;
+            host.version += 1;
+        }
         self.shared.notify();
     }
 
@@ -879,6 +905,37 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_host_keeps_its_samples_and_its_events_their_names() {
+        let monitor = Monitor::new(ProbeSettings::default());
+        let id = monitor.add_for_test(TargetSpec::new("10.0.0.1"));
+        let probe = |t: f64, status| {
+            let seq = monitor.shared.begin_probe(id, t).unwrap();
+            monitor.shared.finish_probe(id, seq, reply(status), 1);
+        };
+        probe(1.0, EchoStatus::TimedOut);
+        monitor.set_label(id, Some("  Office   edge ".into()));
+        probe(2.0, EchoStatus::Reply);
+        {
+            let state = monitor.read();
+            let host = state.host(id).unwrap();
+            assert_eq!(host.name(), "Office edge", "spaces are tidied");
+            assert_eq!(host.history.len(), 2);
+            let logged: Vec<_> = state
+                .events
+                .iter()
+                .map(|e| (e.host_name.as_str(), e.host_address.as_str()))
+                .collect();
+            assert_eq!(logged, [("10.0.0.1", "10.0.0.1"), ("Office edge", "10.0.0.1")]);
+        }
+        monitor.set_label(id, Some(" ".into()));
+        assert_eq!(
+            monitor.read().host(id).unwrap().spec.label,
+            None,
+            "a blank name is none"
+        );
+    }
+
+    #[test]
     fn short_loss_is_not_an_outage() {
         let (shared, id) = shared_with_host();
         for (t, status) in [
@@ -902,6 +959,7 @@ mod tests {
                 at,
                 host: id,
                 host_name: "host".into(),
+                host_address: "10.0.0.1".into(),
                 kind: EventKind::Down,
             });
         }
