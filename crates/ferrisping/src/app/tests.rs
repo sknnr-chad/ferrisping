@@ -7,7 +7,8 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use eframe::App as _;
-use eframe::egui::{self, Modifiers, PointerButton, Pos2, Rect, Vec2, accesskit::Role, pos2, vec2};
+use eframe::egui::accesskit::{Role, Toggled};
+use eframe::egui::{self, Modifiers, PointerButton, Pos2, Rect, Vec2, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use ferrisping_core::{
@@ -15,7 +16,7 @@ use ferrisping_core::{
     parse_targets,
 };
 
-use super::{FerrisPingApp, STORAGE_KEY, Saved};
+use super::{FerrisPingApp, LOOKUPS_LABEL, PRIVACY_URL, STORAGE_KEY, Saved};
 use crate::args::Args;
 use crate::lanes;
 use crate::route::RouteView;
@@ -35,6 +36,19 @@ fn app_with<'a>(args: Args) -> Harness<'a, FerrisPingApp> {
 
 /// The app in a window whose content is `size` points.
 fn app_sized<'a>(args: Args, size: Vec2) -> Harness<'a, FerrisPingApp> {
+    app_saved(args, size, answered())
+}
+
+/// What any run after the first has saved: the notice about the network answered.
+fn answered() -> Saved {
+    Saved {
+        notice_answered: true,
+        ..Saved::default()
+    }
+}
+
+/// The app as `saved` left it, in a window whose content is `size` points.
+fn app_saved<'a>(args: Args, size: Vec2, saved: Saved) -> Harness<'a, FerrisPingApp> {
     let args = Args {
         window_secs: Some(60),
         theme: Some(ThemeChoice::Dark),
@@ -45,9 +59,14 @@ fn app_sized<'a>(args: Args, size: Vec2) -> Harness<'a, FerrisPingApp> {
     let mut harness = Harness::builder()
         .with_size(size)
         .with_step_dt(1.0 / 60.0)
-        .build_eframe(|cc| FerrisPingApp::new(cc, args));
+        .build_eframe(|cc| FerrisPingApp::with_saved(cc, args, saved));
     harness.run_steps(3);
     harness
+}
+
+/// The very first run: nothing saved, and no hosts on the command line.
+fn first_run<'a>() -> Harness<'a, FerrisPingApp> {
+    app_saved(Args::default(), window::SIZE, Saved::default())
 }
 
 fn hosts(harness: &Harness<'_, FerrisPingApp>) -> Vec<String> {
@@ -374,27 +393,28 @@ fn route_panel_fits_its_route_and_resizes_from_its_top_edge() {
     assert!((edge(&harness).top() - fitted).abs() < 1.0);
 }
 
+/// The text the app put on the clipboard within a few frames, if any.
+fn text_copied(harness: &mut Harness<'_, FerrisPingApp>) -> Option<String> {
+    (0..4).find_map(|_| {
+        harness.step();
+        harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+    })
+}
+
 #[test]
 fn copy_report_puts_the_route_on_the_clipboard() {
     let mut harness = app_with(Args::parse(["--route", "127.0.0.1"].into_iter().map(String::from)));
     wait_for(&mut harness, "the route", route_reached);
     harness.get_by_label("Copy report").click();
-    let mut copied = None;
-    for _ in 0..4 {
-        harness.step();
-        copied = copied.or_else(|| {
-            harness
-                .output()
-                .platform_output
-                .commands
-                .iter()
-                .find_map(|command| match command {
-                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
-                    _ => None,
-                })
-        });
-    }
-    let report = copied.expect("the report goes to the clipboard");
+    let report = text_copied(&mut harness).expect("the report goes to the clipboard");
     assert!(
         report.starts_with("FerrisPing route to 127.0.0.1 (127.0.0.1) since "),
         "{report}"
@@ -677,6 +697,198 @@ fn route_panel_reaches_up_to_lanes_that_leave_room() {
     );
 }
 
+const NOTICE_TITLE: &str = "What FerrisPing sends over the network";
+
+/// Whether routes are checked and networks looked up right now.
+fn lookups_on(harness: &Harness<'_, FerrisPingApp>) -> bool {
+    harness.state().monitor.settings().network_lookups
+}
+
+/// Whether the box for checking routes and looking up networks is ticked, in the
+/// notice or the menu, whichever is open.
+fn lookups_ticked(harness: &Harness<'_, FerrisPingApp>) -> bool {
+    harness.get_by_label(LOOKUPS_LABEL).accesskit_node().toggled() == Some(Toggled::True)
+}
+
+fn open_more_options(harness: &mut Harness<'_, FerrisPingApp>) {
+    harness.get_by_label("More options").click();
+    harness.run_steps(2);
+}
+
+/// The address the app asked the browser to open within a few frames, if any.
+fn url_opened(harness: &mut Harness<'_, FerrisPingApp>) -> Option<String> {
+    (0..4).find_map(|_| {
+        harness.step();
+        harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                _ => None,
+            })
+    })
+}
+
+#[test]
+fn the_first_run_says_what_ferrisping_sends_before_sending_it() {
+    let mut harness = first_run();
+    harness.get_by_label(NOTICE_TITLE);
+    assert!(lookups_ticked(&harness), "on unless it's turned off");
+    assert!(
+        !lookups_on(&harness),
+        "nothing is checked or looked up before it's answered"
+    );
+
+    // The whole list is a click away.
+    harness.get_by_label("ferrisping.com/#privacy").click();
+    assert_eq!(url_opened(&mut harness).as_deref(), Some(PRIVACY_URL));
+
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label(NOTICE_TITLE).is_none(), "the notice closes");
+    assert!(lookups_on(&harness));
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    let saved: Saved = eframe::get_value(&storage, STORAGE_KEY).expect("settings were saved");
+    assert!(saved.notice_answered && saved.network_lookups);
+}
+
+#[test]
+fn the_notice_comes_once_and_its_choice_is_kept() {
+    let mut harness = first_run();
+    harness.get_by_label(LOOKUPS_LABEL).click();
+    harness.run_steps(2);
+    assert!(!lookups_ticked(&harness));
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert!(!lookups_on(&harness));
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    drop(harness);
+
+    // The next start reads the settings the way every start does.
+    let mut harness = Harness::builder().with_size(window::SIZE).build_eframe(|cc| {
+        cc.storage = Some(&storage);
+        FerrisPingApp::new(cc, Args::default())
+    });
+    harness.run_steps(3);
+    assert!(harness.query_by_label(NOTICE_TITLE).is_none(), "it isn't asked again");
+    assert!(!lookups_on(&harness));
+    open_more_options(&mut harness);
+    assert!(!lookups_ticked(&harness), "the menu shows the choice");
+}
+
+#[test]
+fn a_session_from_the_command_line_starts_without_the_notice() {
+    let session = || Args {
+        hosts: parse_targets("127.0.0.1"),
+        ..Args::default()
+    };
+    // Even on the very first run, it starts as it always did.
+    let harness = app_saved(session(), window::SIZE, Saved::default());
+    assert!(harness.query_by_label(NOTICE_TITLE).is_none());
+    assert!(lookups_on(&harness));
+    // And it keeps to the choice made before.
+    let off = Saved {
+        network_lookups: false,
+        ..answered()
+    };
+    let harness = app_saved(session(), window::SIZE, off);
+    assert!(!lookups_on(&harness));
+}
+
+#[test]
+fn turning_lookups_off_drops_the_way_out_and_its_switches() {
+    let mut harness = app("127.0.0.1");
+    wait_for(&mut harness, "the address", addresses_known);
+    let now = now_secs();
+    harness.state().monitor.edit_for_test(|state| {
+        let first = router("4.69.0.1");
+        state.networks.insert_for_test(first, 3356, LUMEN);
+        state.hosts[0].exit = Some(Exit {
+            asn: 3356,
+            router: first,
+            hop: 3,
+            since: now,
+            seen: now,
+        });
+    });
+    harness.run_steps(2);
+    harness.get_by_label("via Lumen");
+    let switches_logged =
+        |h: &Harness<'_, FerrisPingApp>| h.query_by_label_contains("switching to another ISP").is_some();
+    assert!(switches_logged(&harness), "the events say switches are logged");
+
+    open_more_options(&mut harness);
+    assert!(lookups_ticked(&harness));
+    harness.get_by_label(LOOKUPS_LABEL).click();
+    harness.run_steps(2);
+    assert!(!lookups_on(&harness));
+    assert!(
+        harness.query_by_label("via Lumen").is_none(),
+        "nothing keeps the way out up to date"
+    );
+    assert!(!switches_logged(&harness), "nor are switches logged");
+
+    // Clicking the box closed the menu.
+    open_more_options(&mut harness);
+    assert!(!lookups_ticked(&harness));
+    harness.get_by_label(LOOKUPS_LABEL).click();
+    harness.run_steps(2);
+    assert!(lookups_on(&harness));
+    assert!(switches_logged(&harness));
+}
+
+#[test]
+fn with_lookups_off_an_open_route_names_no_networks() {
+    let off = Saved {
+        network_lookups: false,
+        ..answered()
+    };
+    let mut harness = app_saved(Args::default(), window::SIZE, off);
+    // A made-up route that's never probed: the home router, the ISP's, and a router
+    // whose network was found before lookups were turned off.
+    let monitor = &harness.state().monitor;
+    monitor.edit_for_test(|state| state.networks.insert_for_test(router("4.69.0.1"), 3356, LUMEN));
+    let host = monitor.add_for_test(TargetSpec::new("1.1.1.1"));
+    let trace = monitor.trace_for_test(router("1.1.1.1"));
+    trace.record_for_test(1, Some((router("192.168.1.1"), 1.0)));
+    trace.record_for_test(2, Some((router("68.85.112.1"), 9.0)));
+    trace.record_for_test(3, Some((router("4.69.0.1"), 12.0)));
+    harness.state_mut().route = Some(RouteView { host, trace });
+    harness.run_steps(3);
+    harness.get_by_label("Private");
+    assert_eq!(harness.query_all_by_label("Lookups off").count(), 2);
+    assert!(
+        harness.query_by_label_contains("Lumen").is_none(),
+        "not even a network found before"
+    );
+
+    harness.get_by_label("Copy report").click();
+    let report = text_copied(&mut harness).expect("the report goes to the clipboard");
+    assert_eq!(report.matches("lookups off").count(), 2, "{report}");
+    assert!(!report.contains("Lumen"), "{report}");
+}
+
+#[test]
+fn the_notice_can_be_read_again_from_the_menu() {
+    let mut harness = app("127.0.0.1");
+    open_more_options(&mut harness);
+    harness.get_by_label("What FerrisPing sends…").click();
+    // A dialog stays hidden for its first frame, while egui measures it.
+    harness.run_steps(4);
+    harness.get_by_label(NOTICE_TITLE);
+    assert!(lookups_ticked(&harness));
+    harness.get_by_label(LOOKUPS_LABEL).click();
+    harness.run_steps(2);
+    assert!(lookups_on(&harness), "the box counts once the notice is closed");
+    harness.get_by_label("OK").click();
+    harness.run_steps(2);
+    assert!(!lookups_on(&harness));
+}
+
 /// Renders a few states to PNG files for a visual check:
 /// `FERRISPING_RENDER_DIR=<dir> cargo test -p ferrisping -- --ignored render_states`
 #[test]
@@ -714,6 +926,17 @@ fn render_states() {
         .unwrap()
         .save(dir.join("ui-interval-menu.png"))
         .unwrap();
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+
+    open_more_options(&mut harness);
+    harness.run_steps(1);
+    harness.render().unwrap().save(dir.join("ui-more-options.png")).unwrap();
+
+    // What the first run shows before anything else.
+    let mut harness = first_run();
+    harness.run_steps(2);
+    harness.render().unwrap().save(dir.join("ui-notice.png")).unwrap();
 
     // The shortest lanes that keep their numbers, and a dozen compact ones in the
     // first window on a 1280 × 800-point laptop screen.
@@ -847,7 +1070,7 @@ fn screenshot_app<'a>(theme: ThemeChoice, window_secs: u64, size: Vec2) -> Harne
         .with_size(size)
         .with_pixels_per_point(1.5)
         .with_theme(egui_theme)
-        .build_eframe(|cc| FerrisPingApp::new(cc, args));
+        .build_eframe(|cc| FerrisPingApp::with_saved(cc, args, answered()));
     harness.run_steps(3);
     harness
 }

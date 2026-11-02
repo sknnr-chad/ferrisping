@@ -4,15 +4,19 @@
 //! a dozen hops out at most. The first router on a public network marks the way
 //! out: the ISP of a home or office line, or whichever of several circuits BGP
 //! picked. A different network there two rounds in a row counts as a switch.
+//!
+//! All of this needs network lookups on (see [`ProbeSettings`]); without them no
+//! probes go out, and hosts have no way out.
 
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::engine::{Event, EventKind, HostId, Shared};
+use crate::engine::{Event, EventKind, HostId, ProbeSettings, Shared};
 use crate::icmp::{self, EchoStatus};
 use crate::network::{self, Owner};
 use crate::now_secs;
@@ -196,17 +200,36 @@ fn first_network(routers: &[(u8, IpAddr, Option<Owner>)]) -> Seen {
     Seen::Nothing
 }
 
-/// Keep track of which network `target`'s traffic leaves through, until the host
-/// is gone or this task is dropped.
+/// Keep track of which network `target`'s traffic leaves through while network
+/// lookups are on, until the host is gone or this task is dropped.
 pub(crate) async fn watch(shared: Arc<Shared>, id: HostId, target: IpAddr) {
     let mut settings = shared.settings_tx.subscribe();
+    // Each time lookups are turned on, start afresh: what was seen before is out of date.
+    while settings.wait_for(|s| s.network_lookups).await.is_ok() {
+        if !follow(&shared, id, target, &mut settings).await {
+            return;
+        }
+    }
+}
+
+/// Check the way out round after round. Returns true when network lookups are
+/// turned off, and false once the host is gone.
+async fn follow(
+    shared: &Arc<Shared>,
+    id: HostId,
+    target: IpAddr,
+    settings: &mut watch::Receiver<ProbeSettings>,
+) -> bool {
     let mut tracker = Tracker::default();
     let mut reached = None;
     loop {
         let s = *settings.borrow_and_update();
+        if !s.network_lookups {
+            return true;
+        }
         if s.paused {
             if settings.changed().await.is_err() {
-                return;
+                return false;
             }
             continue;
         }
@@ -223,16 +246,19 @@ pub(crate) async fn watch(shared: Arc<Shared>, id: HostId, target: IpAddr) {
 
         let mut routers = Vec::new();
         for (hop, router) in tracker.routers() {
-            let owner = network::owner_of(&shared, router).await;
+            let owner = network::owner_of(shared, router).await;
             routers.push((hop, router, owner));
             if !matches!(owner, Some(Owner::Private | Owner::Unannounced)) {
                 break;
             }
         }
-        if !update(&shared, id, &mut tracker, first_network(&routers), now_secs()) {
-            return;
+        if !update(shared, id, &mut tracker, first_network(&routers), now_secs()) {
+            return false;
         }
-        tokio::time::sleep_until(started + CHECK_EVERY).await;
+        tokio::select! {
+            _ = tokio::time::sleep_until(started + CHECK_EVERY) => {}
+            off = settings.wait_for(|s| !s.network_lookups) => return off.is_ok(),
+        }
     }
 }
 
@@ -243,6 +269,10 @@ fn update(shared: &Shared, id: HostId, tracker: &mut Tracker, seen: Seen, now: f
     let Some(host) = state.hosts.iter_mut().find(|h| h.id == id) else {
         return false;
     };
+    // Turned off while this round was out: the host has no way out until they're back on.
+    if !state.settings.network_lookups {
+        return true;
+    }
     let networks = &state.networks;
     // Networks are told apart by name, so wait until the new one has its name.
     let seen = match seen {
@@ -296,6 +326,8 @@ async fn probe(target: IpAddr, limit: u8, timeout: Duration, payload_len: u16) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TargetSpec;
+    use crate::engine::Host;
 
     const LUMEN: u32 = 3356;
     const LUMEN_LEGACY: u32 = 209;
@@ -396,6 +428,32 @@ mod tests {
             (exit.asn, exit.hop, exit.since, exit.seen),
             (LUMEN_LEGACY, 4, 0.0, 90.0)
         );
+    }
+
+    #[test]
+    fn rounds_that_end_after_lookups_are_turned_off_change_nothing() {
+        let shared = Shared::new(ProbeSettings::default());
+        let id = HostId(1);
+        {
+            let mut state = shared.write();
+            state.hosts.push(Host::new(id, TargetSpec::new("10.0.0.1"), 0.0));
+            state
+                .networks
+                .insert_for_test(ip(3), LUMEN, "LEVEL3 - Level 3 Parent, LLC, US");
+            state
+                .networks
+                .insert_for_test(ip(4), COMCAST, "COMCAST-7922 - Comcast Cable Communications, LLC, US");
+        }
+        let mut tracker = Tracker::default();
+        assert!(update(&shared, id, &mut tracker, seen(LUMEN, 3), 0.0));
+        shared.write().settings.network_lookups = false;
+        // Two rounds would make a switch, but they ended after lookups were turned off.
+        for t in [30.0, 60.0] {
+            assert!(update(&shared, id, &mut tracker, seen(COMCAST, 4), t));
+        }
+        let state = shared.read();
+        assert_eq!(state.hosts[0].exit.as_ref().map(|exit| exit.asn), Some(LUMEN));
+        assert!(state.events.is_empty(), "no switch is logged");
     }
 
     #[test]

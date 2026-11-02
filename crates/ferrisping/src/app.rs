@@ -46,6 +46,10 @@ const ROUTE_FIT_SHARE: f32 = 0.55;
 const LANES_MIN_HEIGHT: f32 = 180.0;
 /// How long the status bar says probes are being skipped after the last one was.
 const SKIPPING_SHOWN_SECS: f64 = 10.0;
+/// What FerrisPing sends over the network, in full.
+const PRIVACY_URL: &str = "https://ferrisping.com/#privacy";
+/// The setting's name, in the notice and the menu.
+const LOOKUPS_LABEL: &str = "Check routes and look up networks";
 
 /// What survives a restart.
 #[derive(Serialize, Deserialize)]
@@ -58,6 +62,10 @@ struct Saved {
     show_events: bool,
     /// Names the user gave networks, by AS number.
     network_names: BTreeMap<u32, String>,
+    /// Check each host's route, and ask Team Cymru who runs the routers on a route.
+    network_lookups: bool,
+    /// The notice about what FerrisPing sends over the network has been answered.
+    notice_answered: bool,
 }
 
 impl Default for Saved {
@@ -69,8 +77,17 @@ impl Default for Saved {
             theme: ThemeChoice::System,
             show_events: true,
             network_names: BTreeMap::new(),
+            network_lookups: true,
+            notice_answered: false,
         }
     }
+}
+
+/// The notice about what FerrisPing sends over the network, while it's open. It
+/// opens by itself on the first run, before anything optional is sent.
+struct Notice {
+    /// Whether to check routes and look up networks, as ticked in the notice.
+    lookups: bool,
 }
 
 /// The dialog that names a network, while it's open.
@@ -124,6 +141,7 @@ enum Action {
     Lane(LaneAction),
     Route(RouteAction),
     SetInterval(Duration),
+    SetNetworkLookups(bool),
     TogglePause,
     ClearData,
 }
@@ -149,6 +167,9 @@ pub struct FerrisPingApp {
     /// A host named with `--route`, traced once its address is known.
     route_on_start: Option<TargetSpec>,
     rename: Option<Rename>,
+    notice: Option<Notice>,
+    /// The notice has been answered, on this run or an earlier one.
+    notice_answered: bool,
     logo: Logo,
     /// Hosts came from the command line: a one-off session that isn't saved.
     session: bool,
@@ -157,18 +178,30 @@ pub struct FerrisPingApp {
 
 impl FerrisPingApp {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
-        let saved: Saved = cc
+        let saved = cc
             .storage
             .and_then(|storage| eframe::get_value(storage, STORAGE_KEY))
             .unwrap_or_default();
+        Self::with_saved(cc, args, saved)
+    }
+
+    /// The app as `saved` left it, with `args` on top.
+    fn with_saved(cc: &eframe::CreationContext<'_>, args: Args, saved: Saved) -> Self {
         let theme = args.theme.unwrap_or(saved.theme);
         theme::install(&cc.egui_ctx, theme);
 
+        let session = !args.hosts.is_empty();
+        // Until the notice is answered, routes aren't checked and nothing is looked up.
+        // One-off sessions and pictures for docs go on as before, without it.
+        let notice = (!saved.notice_answered && !session && args.screenshot.is_none()).then_some(Notice {
+            lookups: saved.network_lookups,
+        });
         let interval = args
             .interval
             .unwrap_or(Duration::from_millis(saved.interval_ms).max(MIN_INTERVAL));
         let monitor = Arc::new(Monitor::new(ProbeSettings {
             interval,
+            network_lookups: saved.network_lookups && notice.is_none(),
             ..ProbeSettings::default()
         }));
         let ctx = cc.egui_ctx.clone();
@@ -182,7 +215,6 @@ impl FerrisPingApp {
             monitor.set_network_name(asn, Some(name.clone()));
         }
 
-        let session = !args.hosts.is_empty();
         let hosts = if session {
             args.hosts.clone()
         } else {
@@ -205,6 +237,8 @@ impl FerrisPingApp {
             route_fit: ROUTE_MIN_HEIGHT,
             route_on_start: args.route,
             rename: None,
+            notice,
+            notice_answered: saved.notice_answered,
             logo: Logo::load(&cc.egui_ctx),
             session,
             screenshot: args.screenshot.map(|path| Screenshot {
@@ -232,7 +266,7 @@ impl FerrisPingApp {
 
                     // The right-hand group is laid out right to left.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        self.overflow_menu(ui, p, actions);
+                        self.overflow_menu(ui, p, settings, actions);
                         let (glyph, fallback, label) = if settings.paused {
                             (theme::ICON_PLAY, "▶", "Resume")
                         } else {
@@ -288,7 +322,7 @@ impl FerrisPingApp {
         }
     }
 
-    fn overflow_menu(&mut self, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
+    fn overflow_menu(&mut self, ui: &mut Ui, p: &Palette, settings: &ProbeSettings, actions: &mut Vec<Action>) {
         ui.menu_button(theme::icon(theme::ICON_MORE, "⋯"), |ui| {
             ui.set_min_width(200.0);
             ui.label(RichText::new("Theme").size(12.0).color(p.text_muted));
@@ -297,6 +331,24 @@ impl FerrisPingApp {
                     self.theme = choice;
                     ui.ctx().set_theme(choice.preference());
                 }
+            }
+            ui.separator();
+            let mut lookups = settings.network_lookups;
+            if ui
+                .checkbox(&mut lookups, LOOKUPS_LABEL)
+                .on_hover_text(
+                    "Find the network each host's traffic leaves through, every 30 seconds, and ask \
+                     Team Cymru who runs the routers on a route",
+                )
+                .changed()
+            {
+                actions.push(Action::SetNetworkLookups(lookups));
+            }
+            if ui.button("What FerrisPing sends…").clicked() {
+                self.notice = Some(Notice {
+                    lookups: settings.network_lookups,
+                });
+                ui.close();
             }
             ui.separator();
             if ui.button("Clear graphs and events").clicked() {
@@ -448,6 +500,7 @@ impl FerrisPingApp {
                     });
                 }
                 Action::SetInterval(interval) => self.monitor.update_settings(|s| s.interval = interval),
+                Action::SetNetworkLookups(on) => self.monitor.update_settings(|s| s.network_lookups = on),
                 Action::TogglePause => self.monitor.update_settings(|s| s.paused = !s.paused),
                 Action::ClearData => self.monitor.clear_history(),
             }
@@ -539,6 +592,59 @@ impl FerrisPingApp {
         }
     }
 
+    /// The notice about what FerrisPing sends over the network, while it's open.
+    /// However it's closed, the box ticked in it is the choice.
+    fn notice_dialog(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some(notice) = &mut self.notice else {
+            return;
+        };
+        let mut ok = false;
+        let modal = egui::Modal::new(egui::Id::unique("network-notice")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.label(
+                RichText::new("What FerrisPing sends over the network")
+                    .font(theme::font_semibold(17.0))
+                    .color(p.text),
+            );
+            ui.add_space(6.0);
+            for text in [
+                "FerrisPing pings each host you add, and looks up its name through your DNS server. An open \
+                 route is traced every second, and its routers' names are looked up the same way.",
+                "To show which network each host's traffic leaves through (\"via Comcast\") and who runs each \
+                 router on a route, it can also trace the first hops to each host every 30 seconds, and ask \
+                 Team Cymru's IP-to-ASN service who runs each public router it finds. Those router addresses \
+                 reach your DNS server and Team Cymru.",
+                "Nothing else: no telemetry, no update checks, no accounts.",
+            ] {
+                ui.label(RichText::new(text).color(p.text_secondary));
+                ui.add_space(4.0);
+            }
+            ui.add_space(4.0);
+            ui.checkbox(&mut notice.lookups, LOOKUPS_LABEL);
+            ui.label(
+                RichText::new("You can change this later under More options, at the top right.")
+                    .size(12.5)
+                    .color(p.text_muted),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Details:").color(p.text_secondary));
+                ui.hyperlink_to("ferrisping.com/#privacy", PRIVACY_URL);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(accent_button(p, "OK")).clicked() {
+                        ok = true;
+                    }
+                });
+            });
+        });
+        if ok || modal.should_close() {
+            let lookups = notice.lookups;
+            self.notice = None;
+            self.notice_answered = true;
+            self.monitor.update_settings(|s| s.network_lookups = lookups);
+        }
+    }
+
     fn take_screenshot_when_due(&mut self, ctx: &egui::Context) {
         let Some(shot) = &mut self.screenshot else {
             return;
@@ -621,7 +727,8 @@ impl eframe::App for FerrisPingApp {
                     bottom: 16,
                 }))
                 .show(ui, |ui| {
-                    let out = route::show(ui, view, host, &state.networks, &self.clock, p);
+                    let lookups = settings.network_lookups;
+                    let out = route::show(ui, view, host, &state.networks, lookups, &self.clock, p);
                     route_out = Some((room, height, out));
                 });
         }
@@ -665,6 +772,7 @@ impl eframe::App for FerrisPingApp {
 
         let ctx = ui.ctx().clone();
         self.rename_dialog(&ctx, p);
+        self.notice_dialog(&ctx, p);
         self.apply(&ctx, actions);
         let redraw = redraw_interval(self.window_secs);
         self.redraw_ms.store(redraw.as_millis() as u64, Ordering::Relaxed);
@@ -686,9 +794,10 @@ impl eframe::App for FerrisPingApp {
         // One lock for everything: a second one taken while the first is held can
         // deadlock against a probe waiting to write.
         let state = self.monitor.read();
+        let settings = self.monitor.settings();
         let saved = Saved {
             hosts: state.hosts.iter().map(|h| h.spec.to_input()).collect(),
-            interval_ms: self.monitor.settings().interval.as_millis() as u64,
+            interval_ms: settings.interval.as_millis() as u64,
             window_secs: self.window_secs,
             theme: self.theme,
             show_events: self.show_events,
@@ -697,6 +806,9 @@ impl eframe::App for FerrisPingApp {
                 .user_names()
                 .map(|(asn, name)| (asn, name.to_string()))
                 .collect(),
+            // While the notice is open, what's ticked in it counts, as if it had been closed.
+            network_lookups: self.notice.as_ref().map_or(settings.network_lookups, |n| n.lookups),
+            notice_answered: self.notice_answered,
         };
         drop(state);
         eframe::set_value(storage, STORAGE_KEY, &saved);
