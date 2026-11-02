@@ -302,6 +302,11 @@ h1 {
   padding-top: clamp(3.5rem, 9vw, 6rem);
 }
 
+/* Back-to-back sections on the same background: the first one's bottom padding is gap enough. */
+.section:not(.alt) + .section:not(.alt) {
+  padding-top: 0;
+}
+
 .alt {
   border-block: 1px solid var(--border);
   background: var(--surface);
