@@ -1,0 +1,186 @@
+# Builds ferrisping.exe from a version tag and drafts a GitHub release with it, to read
+# over and publish by hand. Actions are pinned to commits; the comment names the release
+# each one is.
+#
+# To release X.Y.Z:
+#   1. Set `version` in crates/ferrisping/Cargo.toml and update Cargo.lock. If the
+#      dependencies changed, regenerate THIRD-PARTY-NOTICES.md as the README says. Push
+#      that to main.
+#   2. Push the tag vX.Y.Z on that commit.
+#   3. When this workflow has drafted the release, write its "What's new", then publish it
+#      as the latest release.
+#
+# A pull request that changes how the release is built runs the same build and checks
+# without releasing, and so does running this workflow by hand (Actions > Release > Run
+# workflow). The exe is then attached to the run.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/release-notes.md
+      - .cargo/config.toml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ferrisping.exe
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No build cache: a release is built from scratch.
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: Check the version
+        id: version
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json).packages |
+            Where-Object name -eq 'ferrisping' | Select-Object -ExpandProperty version
+          if (-not $version) { throw "Couldn't read FerrisPing's version from Cargo.toml." }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "The tag is $env:GITHUB_REF_NAME, but crates/ferrisping/Cargo.toml says $version."
+          }
+          "FerrisPing $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build
+        run: cargo build --release --locked -p ferrisping
+
+      # .cargo/config.toml builds the C runtime in, so the exe runs without the Visual C++
+      # Redistributable. Check it still does.
+      - name: Check the C runtime is built in
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' |
+            Select-Object -Last 1
+          if (-not $dumpbin) { throw "Couldn't find dumpbin." }
+          $dlls = & $dumpbin /nologo /dependents target\release\ferrisping.exe |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ -match '\.dll$' }
+          if ($LASTEXITCODE -ne 0 -or -not $dlls) { throw "dumpbin couldn't read ferrisping.exe." }
+          $dlls
+          $runtime = $dlls | Where-Object { $_ -match '^(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)' }
+          if ($runtime) { throw "ferrisping.exe needs the Visual C++ runtime: $($runtime -join ', ')" }
+
+      # Start it, ping this machine, save a picture of the window and close. A release build
+      # has no console, so wait for its process rather than for the command.
+      - name: Smoke test
+        run: |
+          $shot = Join-Path $env:RUNNER_TEMP 'smoke-test.png'
+          $exe = (Resolve-Path target\release\ferrisping.exe).Path
+          $process = Start-Process $exe -PassThru -ArgumentList @(
+            '127.0.0.1', '--screenshot', "`"$shot`"", '--screenshot-after', '5', '--exit-after-screenshot'
+          )
+          $null = $process.Handle # keeps the exit code readable once it has exited
+          if (-not $process.WaitForExit(120000)) {
+            $process.Kill()
+            throw "ferrisping.exe was still running after 2 minutes."
+          }
+          if ($process.ExitCode -ne 0) { throw "ferrisping.exe exited with code $($process.ExitCode)." }
+          if (-not (Test-Path $shot)) { throw "ferrisping.exe didn't save its screenshot." }
+          $png = [IO.File]::ReadAllBytes($shot)
+          if ($png.Length -lt 1000 -or [BitConverter]::ToString($png, 0, 4) -ne '89-50-4E-47') {
+            throw "The screenshot isn't a PNG."
+          }
+          "Screenshot: $($png.Length) bytes"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: smoke-test
+          path: ${{ runner.temp }}/smoke-test.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Hash
+        id: hash
+        run: |
+          $sha256 = (Get-FileHash target\release\ferrisping.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "SHA-256 of ferrisping.exe: $sha256"
+          "sha256=$sha256" >> $env:GITHUB_OUTPUT
+
+      - name: Write the release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.hash.outputs.sha256 }}
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target\release\ferrisping.exe, THIRD-PARTY-NOTICES.md dist
+          $notes = (Get-Content .github\release-notes.md -Raw).Replace('{version}', $env:VERSION).Replace('{sha256}', $env:SHA256)
+          Set-Content dist\release-notes.md $notes -NoNewline
+          $notes
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ferrisping
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  # Code signing, once SignPath Foundation accepts FerrisPing (see "Code signing policy" in
+  # the README): a job between these two submits the `ferrisping` artifact with SignPath's
+  # action (signpath/github-action-submit-signing-request), waits while the request is
+  # approved by hand in SignPath, and passes the signed exe on for `release` to attach. The
+  # upload step above then needs an `id`, for its `artifact-id` output. SignPath's API token
+  # goes in a repository secret, never in this file.
+
+  release:
+    name: Draft the release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+      SHA256: ${{ needs.build.outputs.sha256 }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ferrisping
+          path: dist
+
+      - name: Check the exe is the one built
+        run: echo "$SHA256  dist/ferrisping.exe" | sha256sum --check
+
+      - name: Draft the release
+        run: |
+          gh release create "$TAG" --draft --verify-tag --title "FerrisPing $VERSION" \
+            --notes-file dist/release-notes.md dist/ferrisping.exe dist/THIRD-PARTY-NOTICES.md
+
+      - name: Check GitHub's copy
+        run: |
+          digest=$(gh release view "$TAG" --json assets --jq '.assets[] | select(.name == "ferrisping.exe") | .digest')
+          if [ "$digest" != "sha256:$SHA256" ]; then
+            echo "GitHub has $digest for ferrisping.exe, but the build made sha256:$SHA256."
+            exit 1
+          fi
+          echo "GitHub's ferrisping.exe matches the build: $digest"
