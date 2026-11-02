@@ -22,8 +22,8 @@ FerrisPing is new (version 0.2). It runs on Windows 10 and 11; macOS and Linux a
 - **Continuous traceroute**: every hop on the way to a host, measured again and again (like mtr or pathping), so
   loss and delay can be pinned on one hop.
 - **The network your traffic leaves through**: each lane names the first public network on its route
-  ("via Comcast"), checks it every 30 seconds and logs a change. That's handy at a site with two ISPs. You can
-  rename networks to what you call them.
+  ("via Comcast"), checks it every 30 seconds unless the host is down, and logs a change. That's handy at a site
+  with two ISPs. You can rename networks to what you call them.
 - **Quick to fill**: add names or addresses separated by commas, ranges like `10.0.0.1-20` or `10.0.0.1-10.0.0.20`,
   a subnet up to a /24 like `10.0.0.0/24` (without its network and broadcast addresses), IPv6 addresses, and a
   label after an address (`10.0.0.5 Office edge`).
@@ -76,7 +76,8 @@ its own.
 ## What FerrisPing sends over the network
 
 - Pings (ICMP echo requests) to each host you add, at the interval you pick: every second unless you change it.
-- For each host, a short traceroute every 30 seconds, up to 12 hops, to find the first public network on its way.
+- For each host that isn't down, a short traceroute every 30 seconds, up to 12 hops, to find the first public
+  network on its way.
 - While a route is open, a traceroute to that host every second.
 - DNS lookups through your usual DNS server:
   - the names of the hosts you add;
