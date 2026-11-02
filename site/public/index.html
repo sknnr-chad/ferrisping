@@ -144,12 +144,14 @@
             <ul>
               <li>the names of the hosts you add;</li>
               <li>reverse lookups for the names of routers on a route;</li>
-              <li>for each public router address it sees, who owns it and what that network is called, from Team Cymru's IP-to-ASN mapping service. Those router addresses reach your DNS server and Team Cymru. Private addresses are never looked up.</li>
+              <li>for each public router address it sees, who owns it and what that network is called, from Team Cymru's IP-to-ASN mapping service. Those router addresses reach your DNS server and Team Cymru (see Team Cymru's <a href="https://www.team-cymru.com/privacy">privacy policy</a>). Private addresses are never looked up.</li>
             </ul>
           </li>
         </ul>
         <p class="nothing-else">Nothing else: no telemetry, no update checks, no accounts.</p>
-        <p>Pausing stops the pings and traceroutes. There's no switch yet to turn off the route checks or the network lookups on their own; that's planned.</p>
+        <p>Pausing stops the pings and traceroutes.</p>
+        <p><strong>Check routes and look up networks</strong>, under More options (&#8943;) at the top right, turns off the 30-second traceroutes and the Team Cymru lookups. Lanes then don't name the network their traffic leaves through, switches aren't logged, and an open route says &ldquo;Lookups off&rdquo; instead of naming its routers' networks. Router names are still looked up. The setting is on unless you turn it off.</p>
+        <p>The first time FerrisPing starts, it shows a summary of this list with the same choice, and doesn't check routes or look up networks until you've answered with OK. A one-off session started from the command line doesn't show the summary: until it has been answered, a session leaves the setting off unless you turn it on there.</p>
       </div>
       <aside class="card">
         <h3>This website</h3>
