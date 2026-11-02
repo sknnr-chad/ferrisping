@@ -52,6 +52,8 @@ const SKIPPING_SHOWN_SECS: f64 = 10.0;
 const PRIVACY_URL: &str = "https://ferrisping.com/#privacy";
 /// The setting's name, in the notice and the menu.
 const LOOKUPS_LABEL: &str = "Check routes and look up networks";
+/// The jitter strip's setting, in the menu.
+const JITTER_LABEL: &str = "Show jitter under graphs";
 
 /// What survives a restart.
 #[derive(Serialize, Deserialize)]
@@ -62,6 +64,8 @@ struct Saved {
     window_secs: u64,
     theme: ThemeChoice,
     show_events: bool,
+    /// Show jitter in a strip under each graph.
+    show_jitter: bool,
     /// Names the user gave networks, by AS number.
     network_names: BTreeMap<u32, String>,
     /// Check each host's route, and ask Team Cymru who runs the routers on a route.
@@ -78,6 +82,7 @@ impl Default for Saved {
             window_secs: 300,
             theme: ThemeChoice::System,
             show_events: true,
+            show_jitter: false,
             network_names: BTreeMap::new(),
             network_lookups: true,
             notice_answered: false,
@@ -169,6 +174,7 @@ pub struct FerrisPingApp {
     bounds: Option<(f64, f64)>,
     theme: ThemeChoice,
     show_events: bool,
+    show_jitter: bool,
     /// The traceroute in the panel under the lanes, while it's open.
     route: Option<RouteView>,
     /// The route panel's height once the user drags its edge; until then it fits the route.
@@ -246,6 +252,7 @@ impl FerrisPingApp {
             bounds: None,
             theme,
             show_events: saved.show_events,
+            show_jitter: saved.show_jitter,
             route: None,
             route_height: None,
             route_fit: ROUTE_MIN_HEIGHT,
@@ -347,6 +354,11 @@ impl FerrisPingApp {
                 }
             }
             ui.separator();
+            ui.checkbox(&mut self.show_jitter, JITTER_LABEL).on_hover_text(
+                "Add a strip under each graph for jitter, on a scale of its own: how much the round \
+                 trip changes from one reply to the next, on average. With many hosts, lanes are too \
+                 short for it, and hovering a graph shows jitter instead.",
+            );
             let mut lookups = settings.network_lookups;
             if ui
                 .checkbox(&mut lookups, LOOKUPS_LABEL)
@@ -460,6 +472,7 @@ impl FerrisPingApp {
             t1,
             live: self.live,
             interval: settings.interval.as_secs_f64(),
+            jitter: self.show_jitter,
         }
     }
 
@@ -843,6 +856,7 @@ impl eframe::App for FerrisPingApp {
             window_secs: self.window_secs,
             theme: self.theme,
             show_events: self.show_events,
+            show_jitter: self.show_jitter,
             network_names: state
                 .networks
                 .user_names()
