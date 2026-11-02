@@ -4,7 +4,8 @@
 //! Owners come from Team Cymru's free IP-to-ASN service, which answers ordinary DNS
 //! TXT queries: `4.3.2.1.origin.asn.cymru.com` gives the network announcing 1.2.3.4,
 //! and `AS3356.asn.cymru.com` gives that network's registered name. Only public
-//! addresses are ever looked up.
+//! addresses are ever looked up, and only while network lookups are on (see
+//! [`ProbeSettings`](crate::ProbeSettings)).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -80,6 +81,12 @@ impl Networks {
     /// Whether looking up `addr` failed (and will be tried again later).
     pub fn owner_failed(&self, addr: IpAddr) -> bool {
         matches!(self.owners.get(&addr), Some(Lookup::Failed(_)))
+    }
+
+    /// Whether to ask who owns `addr`: it's public, and it hasn't been asked about
+    /// yet, or the last lookup failed.
+    pub(crate) fn owner_wanted(&self, addr: IpAddr) -> bool {
+        is_public(addr) && matches!(self.owners.get(&addr), None | Some(Lookup::Failed(_)))
     }
 
     /// The registry's record for a network, once found.
@@ -367,7 +374,8 @@ pub(crate) fn look_up_owner(shared: &Arc<Shared>, addr: IpAddr) {
 }
 
 /// Who owns `addr`, looking it up (and its network's name) unless that's known or
-/// already on its way. `None` while that isn't known: the lookup is pending or failed.
+/// already on its way. `None` while that isn't known: the lookup is pending or
+/// failed, or network lookups are off.
 ///
 /// The lookup runs as a task of its own, so it finishes (and gets recorded) even if
 /// whoever asked stops waiting.
@@ -376,7 +384,14 @@ pub(crate) async fn owner_of(shared: &Arc<Shared>, addr: IpAddr) -> Option<Owner
 }
 
 async fn look_up(shared: Arc<Shared>, addr: IpAddr) -> Option<Owner> {
-    let begin = shared.write().networks.begin_owner(addr, now_secs());
+    let begin = {
+        let mut state = shared.write();
+        // Nothing goes to Team Cymru while lookups are off; what's known already still counts.
+        if !state.settings.network_lookups {
+            return state.networks.owner(addr);
+        }
+        state.networks.begin_owner(addr, now_secs())
+    };
     let owner = match begin {
         Begin::Known(owner) => owner,
         Begin::Wait => return None,
@@ -393,7 +408,10 @@ async fn look_up(shared: Arc<Shared>, addr: IpAddr) -> Option<Owner> {
         }
     };
     if let Owner::Network(asn) = owner {
-        let start = shared.write().networks.begin_info(asn, now_secs());
+        let start = {
+            let mut state = shared.write();
+            state.settings.network_lookups && state.networks.begin_info(asn, now_secs())
+        };
         if start {
             let found = tokio::task::spawn_blocking(move || query_info(asn)).await;
             let info = found.ok().and_then(Result::ok);
@@ -643,6 +661,45 @@ mod tests {
         networks.finish_info(209, None, 5.0);
         assert!(!networks.begin_info(209, 6.0));
         assert!(networks.begin_info(209, 5.0 + RETRY_FAILED_SECS));
+    }
+
+    #[test]
+    fn owners_wanted_are_ones_not_asked_about_or_not_found() {
+        let mut networks = Networks::default();
+        let addr = ip("4.69.12.34");
+        assert!(!networks.owner_wanted(ip("10.0.0.1")), "private addresses never are");
+        assert!(networks.owner_wanted(addr));
+        networks.begin_owner(addr, 0.0);
+        assert!(!networks.owner_wanted(addr), "already on its way");
+        networks.finish_owner(addr, None, 1.0);
+        assert!(networks.owner_wanted(addr), "failed, so asked again (after a pause)");
+        networks.finish_owner(addr, Some(Owner::Network(3356)), 70.0);
+        assert!(!networks.owner_wanted(addr));
+    }
+
+    #[tokio::test]
+    async fn nothing_is_looked_up_while_lookups_are_off() {
+        let shared = Arc::new(Shared::new(crate::ProbeSettings {
+            network_lookups: false,
+            ..crate::ProbeSettings::default()
+        }));
+        let known = ip("68.86.0.1");
+        shared
+            .write()
+            .networks
+            .insert_for_test(known, 7922, "COMCAST-7922 - Comcast Cable Communications, LLC, US");
+        assert_eq!(look_up(Arc::clone(&shared), ip("10.0.0.1")).await, Some(Owner::Private));
+        assert_eq!(
+            look_up(Arc::clone(&shared), known).await,
+            Some(Owner::Network(7922)),
+            "what's known already still counts"
+        );
+        let unknown = ip("4.69.12.34");
+        assert_eq!(look_up(Arc::clone(&shared), unknown).await, None);
+        assert!(
+            shared.read().networks.owner_wanted(unknown),
+            "not asked about, so it is once lookups are on"
+        );
     }
 
     /// Asks Team Cymru for real: `cargo test -p ferrisping-core -- --ignored live`.

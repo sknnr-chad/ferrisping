@@ -50,6 +50,10 @@ pub struct ProbeSettings {
     /// Consecutive lost probes before a host counts as down.
     pub down_after: u32,
     pub paused: bool,
+    /// Check each host's route for the network its traffic leaves through, and ask
+    /// Team Cymru who runs the public routers on any route. When this is off, neither
+    /// happens: hosts have no [`Exit`], and routes look up no owners.
+    pub network_lookups: bool,
 }
 
 impl Default for ProbeSettings {
@@ -61,6 +65,7 @@ impl Default for ProbeSettings {
             ttl: 128,
             down_after: 3,
             paused: false,
+            network_lookups: true,
         }
     }
 }
@@ -103,7 +108,7 @@ pub struct Host {
 }
 
 impl Host {
-    fn new(id: HostId, spec: TargetSpec, now: f64) -> Self {
+    pub(crate) fn new(id: HostId, spec: TargetSpec, now: f64) -> Self {
         Self {
             id,
             spec,
@@ -271,7 +276,7 @@ impl Drop for ProbeSlot {
 }
 
 impl Shared {
-    fn new(settings: ProbeSettings) -> Self {
+    pub(crate) fn new(settings: ProbeSettings) -> Self {
         Self {
             state: RwLock::new(State {
                 hosts: Vec::new(),
@@ -542,7 +547,16 @@ impl Monitor {
     pub fn update_settings(&self, change: impl FnOnce(&mut ProbeSettings)) {
         let mut settings = self.settings();
         change(&mut settings);
-        self.shared.write().settings = settings;
+        let mut state = self.shared.write();
+        state.settings = settings;
+        if !settings.network_lookups {
+            // Nothing keeps a host's way out up to date now. A check still out when
+            // this changed finds lookups off, and keeps what it saw to itself.
+            for host in &mut state.hosts {
+                host.exit = None;
+            }
+        }
+        drop(state);
         self.shared.settings_tx.send_replace(settings);
         self.shared.notify();
     }
@@ -835,6 +849,25 @@ mod tests {
         drop(slots);
         assert_eq!(shared.probes_out.load(Ordering::Relaxed), 0);
         assert_eq!(silent.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn turning_lookups_off_drops_each_hosts_way_out() {
+        let monitor = Monitor::new(ProbeSettings::default());
+        let id = monitor.add_for_test(TargetSpec::new("10.0.0.1"));
+        let exit = Exit {
+            asn: 3356,
+            router: IpAddr::from([4, 69, 0, 1]),
+            hop: 3,
+            since: 0.0,
+            seen: 0.0,
+        };
+        monitor.edit_for_test(|state| state.hosts[0].exit = Some(exit));
+        let has_exit = || monitor.read().host(id).is_some_and(|host| host.exit.is_some());
+        monitor.update_settings(|s| s.interval = Duration::from_secs(2));
+        assert!(has_exit(), "other changes keep it");
+        monitor.update_settings(|s| s.network_lookups = false);
+        assert!(!has_exit());
     }
 
     #[test]

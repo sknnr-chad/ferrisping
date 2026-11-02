@@ -341,8 +341,9 @@ impl TraceShared {
         self.engine.notify();
     }
 
-    /// Ask again who owns the hops whose owners couldn't be found (while offline, say).
-    fn retry_failed_owners(&self) {
+    /// Ask who owns the hops whose owners aren't known: ones whose lookup failed
+    /// (while offline, say), and ones that answered while network lookups were off.
+    fn look_up_owners(&self) {
         // Never hold the route while locking the engine's state: the UI locks them
         // the other way round.
         let addrs: Vec<IpAddr> = self
@@ -351,11 +352,14 @@ impl TraceShared {
             .iter()
             .flat_map(|hop| hop.addrs.iter().map(|a| a.addr))
             .collect();
-        let failed: Vec<IpAddr> = {
+        let wanted: Vec<IpAddr> = {
             let state = self.engine.read();
-            addrs.into_iter().filter(|&a| state.networks.owner_failed(a)).collect()
+            if !state.settings.network_lookups {
+                return;
+            }
+            addrs.into_iter().filter(|&a| state.networks.owner_wanted(a)).collect()
         };
-        for addr in failed {
+        for addr in wanted {
             network::look_up_owner(&self.engine, addr);
         }
     }
@@ -494,7 +498,7 @@ async fn run(shared: Arc<TraceShared>, settings: TraceSettings) {
             continue;
         }
         let round_start = Instant::now();
-        shared.retry_failed_owners();
+        shared.look_up_owners();
         rounds = rounds.wrapping_add(1);
         let sweep = rounds.is_multiple_of(SWEEP_EVERY);
         let limit = shared.read().probe_limit(sweep);

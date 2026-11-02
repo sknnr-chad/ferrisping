@@ -78,11 +78,14 @@ enum Row {
     Silent(usize, usize),
 }
 
+/// `lookups` says whether network lookups are on: when they're off, hops' owners
+/// aren't looked up, and the route names no networks, not even ones found before.
 pub fn show(
     ui: &mut Ui,
     view: &RouteView,
     host: &Host,
     networks: &Networks,
+    lookups: bool,
     clock: &Clock,
     p: &Palette,
 ) -> RouteOutput {
@@ -109,7 +112,7 @@ pub fn show(
         })
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            header(ui, &route, host, networks, clock, p, &mut out.actions);
+            header(ui, &route, host, networks, lookups, clock, p, &mut out.actions);
             ui.add_space(4.0);
             // The footnote goes in first, along the bottom, so the table gets exactly
             // the space left and scrolls inside it.
@@ -119,7 +122,7 @@ pub fn show(
                     ui.add_space(4.0);
                 }
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                    out.missing_height = table(ui, &route, networks, &rows, &forwarded, p, &mut out.actions);
+                    out.missing_height = table(ui, &route, networks, lookups, &rows, &forwarded, p, &mut out.actions);
                 });
             });
         });
@@ -141,11 +144,13 @@ fn resize_handle(ui: &mut Ui, p: &Palette) -> Response {
         .accessible_name("Route panel size")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn header(
     ui: &mut Ui,
     route: &Route,
     host: &Host,
     networks: &Networks,
+    lookups: bool,
     clock: &Clock,
     p: &Palette,
     actions: &mut Vec<RouteAction>,
@@ -168,7 +173,7 @@ fn header(
             if addr != host.name() {
                 summary = format!("{addr}  ·  {summary}");
             }
-            let path = network_path(route.shown_hops().iter().filter_map(Hop::addr), networks);
+            let path = network_path(route.shown_hops().iter().filter_map(Hop::addr), networks, lookups);
             if !path.is_empty() {
                 let names: Vec<&str> = path.iter().map(|(_, name)| name.as_str()).collect();
                 summary = format!("{summary}  ·  {}", names.join(" → "));
@@ -209,7 +214,7 @@ fn header(
                 .on_hover_text("Copy this table as text, e.g. for a ticket")
                 .clicked()
             {
-                actions.push(RouteAction::Copy(report(route, host, networks, clock)));
+                actions.push(RouteAction::Copy(report(route, host, networks, lookups, clock)));
             }
         },
     );
@@ -217,10 +222,10 @@ fn header(
 
 /// The networks along a route's addresses in order, each once per stretch: AS
 /// number and name.
-fn network_path(addrs: impl Iterator<Item = IpAddr>, networks: &Networks) -> Vec<(u32, String)> {
+fn network_path(addrs: impl Iterator<Item = IpAddr>, networks: &Networks, lookups: bool) -> Vec<(u32, String)> {
     let mut path: Vec<(u32, String)> = Vec::new();
     for addr in addrs {
-        let Some(Owner::Network(asn)) = networks.owner(addr) else {
+        let Some(Owner::Network(asn)) = shown_owner(networks, lookups, addr) else {
             continue;
         };
         let name = networks.name(asn);
@@ -229,6 +234,12 @@ fn network_path(addrs: impl Iterator<Item = IpAddr>, networks: &Networks) -> Vec
         }
     }
     path
+}
+
+/// Who owns `addr`, as far as the route shows it. While network lookups are off,
+/// that's only whether it's private: owners found before don't show either.
+fn shown_owner(networks: &Networks, lookups: bool, addr: IpAddr) -> Option<Owner> {
+    networks.owner(addr).filter(|&owner| lookups || owner == Owner::Private)
 }
 
 /// "reached in 11 hops", "tracing…" and the like.
@@ -247,10 +258,12 @@ fn progress(route: &Route) -> String {
 }
 
 /// Draws the table and returns how much taller it would have to be to show every row.
+#[allow(clippy::too_many_arguments)]
 fn table(
     ui: &mut Ui,
     route: &Route,
     networks: &Networks,
+    lookups: bool,
     rows: &[Row],
     forwarded: &[Option<f32>],
     p: &Palette,
@@ -285,7 +298,17 @@ fn table(
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, rows.len(), |mut row| match rows[row.index()] {
-                Row::Hop(i) => hop_row(&mut row, route, networks, i, forwarded[i], scale_ms, p, actions),
+                Row::Hop(i) => hop_row(
+                    &mut row,
+                    route,
+                    networks,
+                    lookups,
+                    i,
+                    forwarded[i],
+                    scale_ms,
+                    p,
+                    actions,
+                ),
                 Row::Silent(first, last) => silent_row(&mut row, first, last, p),
             });
         });
@@ -297,6 +320,7 @@ fn hop_row(
     row: &mut TableRow<'_, '_>,
     route: &Route,
     networks: &Networks,
+    lookups: bool,
     index: usize,
     real_loss: Option<f32>,
     scale_ms: f32,
@@ -311,7 +335,7 @@ fn hop_row(
         });
     });
     row.col(|ui| host_cell(ui, route, hop, p, actions));
-    row.col(|ui| network_cell(ui, networks, hop, p, actions));
+    row.col(|ui| network_cell(ui, networks, lookups, hop, p, actions));
     row.col(|ui| {
         ui.with_layout(right, |ui| loss_cell(ui, hop, real_loss, p));
     });
@@ -427,11 +451,18 @@ fn host_cell(ui: &mut Ui, route: &Route, hop: &Hop, p: &Palette, actions: &mut V
 }
 
 /// The network a hop's router belongs to, e.g. the ISP.
-fn network_cell(ui: &mut Ui, networks: &Networks, hop: &Hop, p: &Palette, actions: &mut Vec<RouteAction>) {
+fn network_cell(
+    ui: &mut Ui,
+    networks: &Networks,
+    lookups: bool,
+    hop: &Hop,
+    p: &Palette,
+    actions: &mut Vec<RouteAction>,
+) {
     let Some(addr) = hop.addr() else {
         return;
     };
-    let (text, tip) = match networks.owner(addr) {
+    let (text, tip) = match shown_owner(networks, lookups, addr) {
         Some(Owner::Network(asn)) => return network_label(ui, networks, asn, p, actions),
         Some(Owner::Private) => (
             "Private",
@@ -441,6 +472,11 @@ fn network_cell(ui: &mut Ui, networks: &Networks, hop: &Hop, p: &Palette, action
             "Not announced",
             "A public address that no network announces on the internet. Some providers \
              number their routers that way.",
+        ),
+        None if !lookups => (
+            "Lookups off",
+            "Network lookups are off, so FerrisPing doesn't ask Team Cymru who runs this address. \
+             Turn them on under More options, at the top right.",
         ),
         None if networks.owner_failed(addr) => (
             "?",
@@ -646,7 +682,7 @@ fn is_private(addr: IpAddr) -> bool {
 }
 
 /// The table as plain text, for pasting into a ticket or a chat.
-fn report(route: &Route, host: &Host, networks: &Networks, clock: &Clock) -> String {
+fn report(route: &Route, host: &Host, networks: &Networks, lookups: bool, clock: &Clock) -> String {
     let hops = route.shown_hops();
     let mut out = String::new();
     let _ = writeln!(
@@ -657,7 +693,7 @@ fn report(route: &Route, host: &Host, networks: &Networks, clock: &Clock) -> Str
         clock.time(route.started),
         progress(route)
     );
-    let path = network_path(hops.iter().filter_map(Hop::addr), networks);
+    let path = network_path(hops.iter().filter_map(Hop::addr), networks, lookups);
     if !path.is_empty() {
         let names: Vec<String> = path.iter().map(|(asn, name)| format!("{name} (AS{asn})")).collect();
         let _ = writeln!(out, "Networks: {}", names.join(" -> "));
@@ -695,10 +731,11 @@ fn report(route: &Route, host: &Host, networks: &Networks, clock: &Clock) -> Str
             .loss_pct()
             .filter(|_| hop.answered())
             .map_or_else(|| "-".to_string(), format::percent);
-        let network = match hop.addr().and_then(|addr| networks.owner(addr)) {
+        let network = match hop.addr().and_then(|addr| shown_owner(networks, lookups, addr)) {
             Some(Owner::Network(asn)) => format!("{} AS{asn}", networks.name(asn)),
             Some(Owner::Private) => "private".to_string(),
             Some(Owner::Unannounced) => "not announced".to_string(),
+            None if !lookups && hop.addr().is_some() => "lookups off".to_string(),
             None => String::new(),
         };
         let _ = writeln!(
@@ -782,7 +819,7 @@ mod tests {
         networks.insert_for_test(ip("1.1.1.1"), 13335, "CLOUDFLARENET - Cloudflare, Inc., US");
         // A private hop, and one whose owner isn't known yet, don't break a stretch.
         let addrs = ["10.0.0.1", "68.86.0.1", "62.0.0.1", "9.9.9.9", "62.0.0.2", "1.1.1.1"].map(ip);
-        let path = network_path(addrs.into_iter(), &networks);
+        let path = network_path(addrs.into_iter(), &networks, true);
         assert_eq!(
             path,
             [
@@ -791,6 +828,27 @@ mod tests {
                 (13335, "Cloudflare".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn with_lookups_off_a_route_names_no_networks() {
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        let mut networks = Networks::default();
+        // Found while lookups were on.
+        networks.insert_for_test(
+            ip("68.86.0.1"),
+            7922,
+            "COMCAST-7922 - Comcast Cable Communications, LLC, US",
+        );
+        assert_eq!(
+            shown_owner(&networks, true, ip("68.86.0.1")),
+            Some(Owner::Network(7922))
+        );
+        assert_eq!(shown_owner(&networks, false, ip("68.86.0.1")), None);
+        // Telling a private address needs no lookup.
+        assert_eq!(shown_owner(&networks, false, ip("10.0.0.1")), Some(Owner::Private));
+        let addrs = ["10.0.0.1", "68.86.0.1"].map(ip);
+        assert!(network_path(addrs.into_iter(), &networks, false).is_empty());
     }
 
     #[test]
