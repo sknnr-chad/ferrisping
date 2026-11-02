@@ -24,7 +24,8 @@ FerrisPing is new (version 0.2). It runs on Windows 10 and 11; macOS and Linux a
 - **The network your traffic leaves through**: each lane names the first public network on its route
   ("via Comcast"), checks it every 30 seconds and logs a change. That's handy at a site with two ISPs. You can
   rename networks to what you call them.
-- **Quick to fill**: add names or addresses separated by commas, ranges like `10.0.0.1-20`, IPv6 addresses, and a
+- **Quick to fill**: add names or addresses separated by commas, ranges like `10.0.0.1-20` or `10.0.0.1-10.0.0.20`,
+  a subnet up to a /24 like `10.0.0.0/24` (without its network and broadcast addresses), IPv6 addresses, and a
   label after an address (`10.0.0.5 Office edge`).
 - **No admin rights, no installer**: one .exe that pings with the same Windows ICMP API as `ping.exe` and
   `tracert.exe`.

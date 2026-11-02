@@ -406,7 +406,7 @@ impl FerrisPingApp {
             ui.label(
                 RichText::new(
                     "Type a host name or IP address in the box above. Add several at once \
-                     with commas, or a range like 10.0.0.1-20.",
+                     with commas, a range like 10.0.0.1-20, or a subnet like 10.0.0.0/24.",
                 )
                 .color(p.text_secondary),
             );

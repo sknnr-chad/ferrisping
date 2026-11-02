@@ -718,6 +718,10 @@ impl Drop for AbortOnDrop {
 }
 
 async fn resolve(spec: &TargetSpec) -> Result<IpAddr, String> {
+    // A range or block left as typed would only fail as a name, less helpfully.
+    if let Some(problem) = crate::target::range_problem(&spec.host) {
+        return Err(problem);
+    }
     let host = spec.host.trim_start_matches('[').trim_end_matches(']').to_string();
     let family = spec.family;
     // An address needs no lookup, but it still has to be of the family asked for.
@@ -792,6 +796,10 @@ mod tests {
         assert_eq!(resolve_text("ipv6:1.1.1.1").await, Err("No IPv6 address".to_string()));
         assert_eq!(resolve_text("ipv4:::1").await, Err("No IPv4 address".to_string()));
         assert_eq!(resolve_text("ipv6:[::1]").await, Ok("::1".parse().unwrap()));
+        assert_eq!(
+            resolve_text("10.0.0.0/16").await,
+            Err("Too many addresses: the biggest block is a /24".to_string())
+        );
     }
 
     #[test]
