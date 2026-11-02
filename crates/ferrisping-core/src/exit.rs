@@ -289,6 +289,7 @@ fn update(shared: &Shared, id: HostId, tracker: &mut Tracker, seen: Seen, now: f
             at: change.at,
             host: id,
             host_name: host.name().to_string(),
+            host_address: host.address(),
             kind: EventKind::ExitChanged {
                 from: change.from,
                 to: change.to,

@@ -135,6 +135,10 @@ pub fn font_semibold(size: f32) -> FontId {
     FontId::new(size, semibold())
 }
 
+/// The narrowest a host's name is cut to, to fit its address beside it. Any
+/// narrower, and the address makes way instead.
+pub const NAME_MIN_WIDTH: f32 = 80.0;
+
 static HAS_ICONS: AtomicBool = AtomicBool::new(false);
 
 /// A Segoe Fluent Icons glyph, or the fallback text if the icon font isn't installed.
