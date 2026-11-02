@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- FerrisPing: a Ferris-style crab sending a ping. An original drawing after
+       Ferris the crab by Karen Rustad Tölva, which is dedicated to the public domain (CC0). -->
+  <defs>
+    <linearGradient id="shell" x1="0" y1="40" x2="0" y2="230" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF7A2B"/>
+      <stop offset="1" stop-color="#E24500"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="45" x2="0" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4BA3FF"/>
+      <stop offset="1" stop-color="#2A78D6"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(0 -17)">
+    <!-- legs, behind the shell -->
+    <g fill="none" stroke="#B53A08" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M66 176 L36 170 L20 186"/>
+      <path d="M66 190 L38 194 L26 214"/>
+      <path d="M80 200 L56 214 L50 234"/>
+      <path d="M190 176 L220 170 L236 186"/>
+      <path d="M190 190 L218 194 L230 214"/>
+      <path d="M176 200 L200 214 L206 234"/>
+    </g>
+    <!-- arms -->
+    <g fill="none" stroke="url(#shell)" stroke-width="16" stroke-linecap="round">
+      <path d="M74 150 Q50 138 48 100"/>
+      <path d="M182 150 Q206 138 208 100"/>
+    </g>
+    <!-- claws, open toward the middle -->
+    <g fill="url(#shell)">
+      <path d="M46 78 L67.13 59.63 A28 28 0 1 1 46.49 50 Z"/>
+      <path d="M210 78 L188.87 59.63 A28 28 0 1 0 209.51 50 Z"/>
+    </g>
+    <!-- shell -->
+    <path fill="url(#shell)" d="M56 180 C56 138 88 110 128 110 C168 110 200 138 200 180 C200 196 188 204 172 204 L84 204 C68 204 56 196 56 180 Z"/>
+    <!-- face -->
+    <circle cx="106" cy="146" r="11" fill="#1B1B1B"/>
+    <circle cx="150" cy="146" r="11" fill="#1B1B1B"/>
+    <circle cx="109.5" cy="142" r="4" fill="#FFFFFF"/>
+    <circle cx="153.5" cy="142" r="4" fill="#FFFFFF"/>
+    <path d="M116 172 Q128 184 140 172" fill="none" stroke="#6E2000" stroke-width="5" stroke-linecap="round"/>
+    <!-- ping -->
+    <g fill="none" stroke="url(#wave)" stroke-width="12" stroke-linecap="round">
+      <path d="M107.93 93.71 A30 30 0 0 1 148.07 93.71"/>
+      <path d="M93.21 77.36 A52 52 0 0 1 162.79 77.36"/>
+    </g>
+  </g>
+</svg>

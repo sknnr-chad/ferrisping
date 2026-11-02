@@ -1,0 +1,15 @@
+[package]
+name = "ferrisping-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "FerrisPing's engine: ICMP probing, scheduling and per-host history"
+license = "MIT"
+publish = false
+
+[dependencies]
+dns-lookup = "4.0.2"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_IO"] }

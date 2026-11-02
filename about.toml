@@ -1,0 +1,185 @@
+# What `cargo about` collects for THIRD-PARTY-NOTICES.md: the libraries built into
+# ferrisping.exe, under these licenses only. A new dependency under any other license
+# makes it fail, so it gets looked at before it ships. Regenerate with:
+#   cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
+#
+# The clarifications below name the license file for crates whose own file cargo-about
+# can't find or recognize, so the notices carry each copyright line instead of a blank
+# template. The `git` ones fetch the file from the crate's repository, so generating needs
+# the network. A "failed to validate" warning means a dependency's license file changed:
+# read the new one and update its checksum (sha256 of the file).
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Bitstream-Vera",
+]
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# FerrisPing's own crates (publish = false): LICENSE covers them.
+[private]
+ignore = true
+
+# egui's fonts. The crate's license field leaves out the Hack font's, which is MIT for
+# Hack and the Bitstream Vera License for the glyphs it got from Bitstream Vera.
+[epaint_default_fonts.clarify]
+license = "(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0 AND Bitstream-Vera"
+files = [
+    { path = "fonts/emoji-icon-font-mit-license.txt", license = "MIT", checksum = "b9d2c1d909aa149996fd4c91dcb92b2362a04431640c1d200959da94caf8cde1" },
+    { path = "fonts/Hack-Regular.txt", license = "MIT", start = "The work in the Hack project", end = "OTHER DEALINGS IN THE SOFTWARE.", checksum = "0a3a32afbdf4e819812135f5fa523498f3f8abdd5a262fc07bee14dd44b58a24" },
+    { path = "fonts/Hack-Regular.txt", license = "Bitstream-Vera", start = "BITSTREAM VERA LICENSE", checksum = "c3f7268ffd19b6fedc97d1cfb21b11ca81acd238bff23a7923c2ebb5eb131170" },
+    { path = "fonts/OFL.txt", license = "OFL-1.1", checksum = "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2" },
+    { path = "fonts/UFL.txt", license = "Ubuntu-font-1.0", checksum = "2f0015108d68627bd788d313f529c21ff4da2c2c42a5e1f3883acc83480f9002" },
+]
+
+# egui's crates don't ship its license file. Some 0.37.0 crates were published from a
+# commit GitHub doesn't serve, so all of them read it from one that it does.
+[ecolor.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "3c6eb8261c3293ad9c7ea1ed58487e038860ebef"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" }]
+
+[eframe.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "3c6eb8261c3293ad9c7ea1ed58487e038860ebef"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" }]
+
+[egui.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "3c6eb8261c3293ad9c7ea1ed58487e038860ebef"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" }]
+
+[egui-wgpu.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "3c6eb8261c3293ad9c7ea1ed58487e038860ebef"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" }]
+
+[egui-winit.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "3c6eb8261c3293ad9c7ea1ed58487e038860ebef"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" }]
+
+[egui_extras.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "3c6eb8261c3293ad9c7ea1ed58487e038860ebef"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" }]
+
+[egui_system_font_provider.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "3c6eb8261c3293ad9c7ea1ed58487e038860ebef"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" }]
+
+[emath.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "3c6eb8261c3293ad9c7ea1ed58487e038860ebef"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" }]
+
+[epaint.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "3c6eb8261c3293ad9c7ea1ed58487e038860ebef"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" }]
+
+[egui_plot.clarify]
+license = "MIT OR Apache-2.0"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+
+# AccessKit's crates don't ship its license file either.
+[accesskit.clarify]
+license = "MIT OR Apache-2.0"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+
+[accesskit_consumer.clarify]
+license = "MIT OR Apache-2.0"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+
+[accesskit_windows.clarify]
+license = "MIT OR Apache-2.0"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+
+[profiling.clarify]
+license = "MIT OR Apache-2.0"
+git = [{ path = "LICENSE-MIT", license = "MIT", checksum = "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333" }]
+
+# These ship their license files, under names or wording cargo-about doesn't match.
+[dpi.clarify]
+license = "Apache-2.0 AND MIT"
+files = [
+    { path = "LICENSE", license = "Apache-2.0", checksum = "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a" },
+    { path = "LICENSE-LIBM-MIT", license = "MIT", checksum = "9eff396a99bafd208e7126602420d6864f6066c08b84485a5b032320a9c01997" },
+]
+
+[libm.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", license = "MIT", checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7" }]
+
+[type-map.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "LICENSE-MIT", license = "MIT", checksum = "b47fb719a40d9ef9c8e3be525c41ce129c46d613cfc96a91bddd7c19dcebf7a1" }]
+
+# Microsoft's windows-rs crates, which all carry the same license-mit.
+[windows.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-collections.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-core.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-future.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-implement.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-interface.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-link.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-numerics.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-result.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-strings.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-sys.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-targets.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-threading.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows_x86_64_msvc.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]

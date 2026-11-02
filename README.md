@@ -1,0 +1,149 @@
+# <img src="crates/ferrisping/assets/ferrisping-64.png" width="40" alt=""> FerrisPing
+
+Watch latency, packet loss, outages and route changes for several hosts at once, on Windows.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/ferrisping-dark.png">
+  <img src="docs/screenshots/ferrisping-light.png" alt="FerrisPing watching six hosts during a rolling update: two have restarted and one is down">
+</picture>
+
+Add the hosts you care about, and FerrisPing pings each one in a lane of its own, with live graphs on one shared
+time axis, so you can see which host dropped out and when. It's made for jobs like watching servers restart one
+by one during a rolling update, or keeping an eye on a flaky link.
+
+FerrisPing is new (version 0.1). It runs on Windows 10 and 11; macOS and Linux are planned.
+
+## Features
+
+- **A lane per host**: the current round trip, average, minimum, maximum, jitter and loss, with a graph of the last
+  minute up to the last 24 hours. Drag or zoom a graph to look back, and double-click it to go back to live.
+- **Outages logged**: a host that misses 3 replies in a row is marked down. The events list notes when it went
+  down, when it came back and how long it was out.
+- **Continuous traceroute**: every hop on the way to a host, measured again and again (like mtr or pathping), so
+  loss and delay can be pinned on one hop.
+- **The network your traffic leaves through**: each lane names the first public network on its route
+  ("via Comcast"), checks it every 30 seconds and logs a change. That's handy at a site with two ISPs. You can
+  rename networks to what you call them.
+- **Quick to fill**: add names or addresses separated by commas, ranges like `10.0.0.1-20`, IPv6 addresses, and a
+  label after an address (`10.0.0.5 Office edge`).
+- **No admin rights, no installer**: one .exe that pings with the same Windows ICMP API as `ping.exe` and
+  `tracert.exe`.
+- Light and dark themes, or follow Windows.
+
+## Install
+
+Download `ferrisping.exe` from [Releases](../../releases) and run it. It keeps your hosts, interval, time window,
+theme and network names in `%APPDATA%\FerrisPing`. Graphs and events are kept in memory only, so they start fresh
+each time.
+
+The exe isn't code-signed yet, so Windows SmartScreen may warn about it the first time: choose **More info**, then
+**Run anyway**.
+
+## Tracing a route
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/ferrisping-route.png">
+  <img src="docs/screenshots/ferrisping-route-light.png" alt="The route to 1.1.1.1: eight hops through Comcast to Cloudflare, one of them silent and one skipping some replies">
+</picture>
+
+Hover a lane and click **Route**, or right-click it and choose **Trace route**. Each row is one hop: who answered,
+whose network it's on, the loss, and the last, average, best and worst round trips, with the latest results on the
+right. **Copy report** copies the table as text, for a ticket or a chat. Right-click a hop to watch it in a lane of
+its own.
+
+## Reading the numbers
+
+- **Loss at a hop in the middle of a route isn't always real.** Routers often limit how many traceroute replies
+  they send. When the hops after one don't share its loss, traffic is getting through, so FerrisPing greys that
+  loss out and says so.
+- **"via Comcast" is the first public network on the route.** Usually that's the ISP your traffic goes out
+  through, but a VPN, routers that don't answer, or a site with its own network number can make it something else.
+  Treat a logged switch as a strong hint, not proof.
+- **Round trips under a millisecond are estimates.** Windows reports whole milliseconds, so FerrisPing times each
+  probe itself and takes off the measured timer overhead.
+
+## What FerrisPing sends over the network
+
+- Pings (ICMP echo requests) to each host you add, at the interval you pick: every second unless you change it.
+- For each host, a short traceroute every 30 seconds, up to 12 hops, to find the first public network on its way.
+- While a route is open, a traceroute to that host every second.
+- DNS lookups through your usual DNS server:
+  - the names of the hosts you add;
+  - reverse lookups for the names of routers on a route;
+  - for each public router address it sees, who owns it and what that network is called, from Team Cymru's
+    IP-to-ASN mapping service. Those router addresses reach your DNS server and Team Cymru. Private addresses are
+    never looked up.
+
+Nothing else: no telemetry, no update checks, no accounts. Pausing stops the pings and traceroutes. There's no
+switch yet to turn off the route checks or the network lookups on their own; that's planned.
+
+## Command line
+
+```
+ferrisping [hosts...] [--interval 0.5] [--window 15m] [--theme dark|light|system] [--route <host>]
+```
+
+Hosts given on the command line start a one-off session that isn't saved. `--route <host>` also opens that host's
+route.
+
+## Building from source
+
+You need Windows 10 or 11, [Rust](https://rustup.rs) 1.99 or newer, and the Visual Studio Build Tools with the
+"Desktop development with C++" workload.
+
+```
+cargo build --release
+```
+
+The exe lands in `target\release\ferrisping.exe`. It's built with the C runtime linked in
+(`.cargo/config.toml`), so it runs on PCs without the Visual C++ Redistributable. The first build takes several
+minutes.
+
+Before sending a change, run:
+
+```
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+The UI tests drive the real window without showing it, and only ping loopback addresses. The screenshots in
+`docs/screenshots` are drawn from made-up hosts and routes. To redraw them, from the repository's root in
+PowerShell:
+
+```
+$env:FERRISPING_RENDER_DIR = "$PWD\docs\screenshots"; cargo test -p ferrisping -- --ignored render_screenshots
+```
+
+If you add or update a dependency, regenerate `THIRD-PARTY-NOTICES.md` with
+[cargo-about](https://github.com/EmbarkStudios/cargo-about) (it fetches a few license files from GitHub):
+
+```
+cargo install cargo-about --locked --features cli
+cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
+```
+
+## Roadmap
+
+Windows comes first, and macOS and Linux are next. The pinging and DNS code is the Windows-only part, so on other
+systems FerrisPing doesn't work yet. After that: alerts (tray, sound, email), saved host groups and TCP port
+checks. There are no dates.
+
+## Contributing
+
+Issues and pull requests are welcome. FerrisPing is a small project looked after in spare time, so answers may take
+a while. Please run the checks above before sending a pull request.
+
+## About
+
+FerrisPing is made by Chad Skinner, with much of the code written by Claude, an AI model.
+
+It started as a modern replacement for MultiPing. It's an independent project: it contains no MultiPing code, and
+it isn't affiliated with Pingman Tools, who make MultiPing.
+
+The crab is drawn in the style of Ferris, the unofficial Rust mascot, which is in the public domain.
+
+## License
+
+MIT; see [LICENSE](LICENSE). The libraries and fonts built into the exe have licenses of their own, collected in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

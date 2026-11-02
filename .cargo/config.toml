@@ -1,0 +1,4 @@
+# Build Microsoft's C runtime into the exe, so FerrisPing runs on a Windows PC
+# that doesn't have the Visual C++ Redistributable installed.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
