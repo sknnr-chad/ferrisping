@@ -1,0 +1,492 @@
+/* ferrisping.com. The colours are the app's own light and dark themes (crates/ferrisping/src/theme.rs),
+   with the crab's orange for the download button. The page follows the system theme; there's no script. */
+
+:root {
+  color-scheme: light dark;
+  --page: #f3f3f1;
+  --surface: #fcfcfb;
+  --raised: #ebebe8;
+  --border: #e4e4e3;
+  --border-strong: #cfcfca;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --muted: #6b6a65;
+  --link: #1f63b8;
+  --ping: #2a78d6;
+  --brand: #e24500;
+  --warning: #fab219;
+  --cta: #c2410c;
+  --cta-hover: #a8380a;
+  --on-cta: #ffffff;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 14px 36px -10px rgb(0 0 0 / 0.2);
+  --radius: 12px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --raised: #242423;
+    --border: #313130;
+    --border-strong: #45453f;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --muted: #9a988f;
+    --link: #6aa8f2;
+    --ping: #3987e5;
+    --cta: #ff7a2b;
+    --cta-hover: #ff9152;
+    --on-cta: #1a0800;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 18px 44px -14px rgb(0 0 0 / 0.75);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text);
+  font: 400 1.0625rem/1.6 var(--font);
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+a {
+  color: var(--link);
+  text-underline-offset: 0.15em;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 3px solid var(--ping);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+p,
+li,
+dd {
+  text-wrap: pretty;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+code {
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+  background: var(--raised);
+  overflow-wrap: anywhere;
+}
+
+pre {
+  margin: 0 0 1rem;
+  padding: 1rem 1.1rem;
+  border-radius: 10px;
+  background: var(--raised);
+  white-space: pre-wrap;
+}
+
+pre code {
+  padding: 0;
+  background: none;
+  overflow-wrap: normal;
+}
+
+/* Keeps a command-line option on one line when the synopsis wraps. */
+.nw {
+  white-space: nowrap;
+}
+
+figure {
+  margin: 0;
+}
+
+.wrap {
+  width: min(100% - 2rem, 70rem);
+  margin-inline: auto;
+}
+
+.narrow > * {
+  max-width: 46rem;
+}
+
+.skip {
+  position: absolute;
+  top: -4rem;
+  left: 1rem;
+  z-index: 1;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.skip:focus {
+  top: 1rem;
+}
+
+/* Header */
+
+.site-header {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem 1.5rem;
+  padding-block: 0.75rem;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text);
+  font-size: 1.25rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.site-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.25rem;
+}
+
+.site-nav a {
+  padding-block: 0.5rem;
+  color: var(--text-2);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.site-nav a:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+/* Hero */
+
+.hero {
+  padding-top: clamp(2.5rem, 7vw, 5rem);
+  background: radial-gradient(64rem 30rem at 50% -8rem, color-mix(in srgb, var(--brand) 14%, transparent), transparent 70%);
+  text-align: center;
+}
+
+.eyebrow {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+h1 {
+  max-width: 17ch;
+  margin: 0 auto;
+  font-size: clamp(2.25rem, 6vw, 3.75rem);
+  font-weight: 750;
+  letter-spacing: -0.025em;
+}
+
+.lede {
+  max-width: 40rem;
+  margin: 1.25rem auto 0;
+  color: var(--text-2);
+  font-size: clamp(1.125rem, 2.2vw, 1.3rem);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 3rem;
+  padding: 0.7rem 1.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.button:hover {
+  border-color: var(--muted);
+}
+
+.button.primary {
+  border-color: var(--cta);
+  background: var(--cta);
+  color: var(--on-cta);
+}
+
+.button.primary:hover {
+  border-color: var(--cta-hover);
+  background: var(--cta-hover);
+}
+
+.fine {
+  margin: 1rem auto 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.fine + .fine {
+  margin-top: 0.35rem;
+}
+
+.shot {
+  margin-top: clamp(2.5rem, 6vw, 3.5rem);
+}
+
+.shot img {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* Sections */
+
+.section {
+  padding-block: clamp(3rem, 8vw, 5.5rem);
+}
+
+.hero + .section {
+  padding-top: clamp(3.5rem, 9vw, 6rem);
+}
+
+.alt {
+  border-block: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.section h2 {
+  margin: 0 0 1rem;
+  font-size: clamp(1.6rem, 3.6vw, 2.25rem);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.section h3 {
+  margin: 2rem 0 0.6rem;
+  font-size: 1.2rem;
+}
+
+.section-lede {
+  max-width: 46rem;
+  margin: 0 0 1rem;
+  color: var(--text-2);
+  font-size: 1.15rem;
+}
+
+.section-lede:last-of-type {
+  margin-bottom: 2rem;
+}
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 19rem), 1fr));
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.features li {
+  padding: 1.25rem 1.35rem 1.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.features li::before {
+  content: "";
+  display: block;
+  width: 2rem;
+  height: 3px;
+  margin-bottom: 1rem;
+  border-radius: 2px;
+  background: var(--ping);
+}
+
+.features h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1.1rem;
+}
+
+.features p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 1rem;
+}
+
+.notes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+  gap: 1.5rem 2rem;
+  margin: 1.5rem 0 0;
+}
+
+.notes dt {
+  margin-bottom: 0.4rem;
+  font-weight: 650;
+}
+
+.notes dd {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.privacy {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+  gap: 2rem 3rem;
+  align-items: start;
+}
+
+.sends {
+  margin: 0 0 1.25rem;
+  padding-left: 1.25rem;
+}
+
+.sends li {
+  margin-bottom: 0.6rem;
+}
+
+.sends ul {
+  margin-top: 0.6rem;
+  padding-left: 1.25rem;
+}
+
+.nothing-else {
+  font-size: 1.15rem;
+  font-weight: 650;
+}
+
+.card {
+  padding: 1.25rem 1.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--page);
+}
+
+.card h3 {
+  margin-top: 0;
+}
+
+.card p {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.callout {
+  padding: 0.9rem 1.1rem;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--warning);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+/* Footer */
+
+.site-footer {
+  padding-block: 2.5rem 3rem;
+  color: var(--text-2);
+  font-size: 0.95rem;
+}
+
+.site-footer p {
+  max-width: 46rem;
+  margin: 0 0 0.75rem;
+}
+
+.footer-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text);
+  font-size: 1.1rem;
+  font-weight: 650;
+}
+
+.footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  padding-top: 0.75rem;
+}
+
+/* 404 */
+
+.not-found {
+  display: grid;
+  justify-items: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  align-content: center;
+  padding-block: 3rem;
+  text-align: center;
+}
+
+.not-found h1 {
+  margin-top: 1.5rem;
+  font-size: clamp(1.75rem, 5vw, 2.5rem);
+}
+
+.not-found p {
+  margin: 1rem 0 0;
+  color: var(--text-2);
+}
+
+@media (max-width: 720px) {
+  .privacy {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
