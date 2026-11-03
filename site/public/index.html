@@ -74,8 +74,16 @@
           <p>The current round trip, average, minimum, maximum, jitter and loss, with a graph of the last minute up to the last 24 hours. Drag or zoom a graph to look back, and double-click it to go back to live.</p>
         </li>
         <li>
+          <h3>Names of your own</h3>
+          <p>Give a host a name when you add it, or later by right-clicking its lane and choosing <strong>Rename&hellip;</strong>, which keeps its graph. Its address shows beside the name, in the lane and in the events list.</p>
+        </li>
+        <li>
           <h3>Outages logged</h3>
           <p>A host that misses 3 replies in a row is marked down. The events list notes when it went down, when it came back and how long it was out.</p>
+        </li>
+        <li>
+          <h3>Alerts as Windows notifications</h3>
+          <p>When a host stops answering and answers again, when its traffic switches to another network, and when its loss or round trips cross limits you set, for every host or for one. They come from FerrisPing's tray icon, so nothing goes over the network. Turn on <strong>Keep running in the tray when closed</strong> to keep pinging with the window closed.</p>
         </li>
         <li>
           <h3>Continuous traceroute</h3>
@@ -88,6 +96,10 @@
         <li>
           <h3>Quick to fill</h3>
           <p>Add names or addresses separated by commas, ranges like <code>10.0.0.1-20</code> or <code>10.0.0.1-10.0.0.20</code>, a subnet up to a /24 like <code>10.0.0.0/24</code> (without its network and broadcast addresses), IPv6 addresses, and a label after an address (<code>10.0.0.5 Office edge</code>).</p>
+        </li>
+        <li>
+          <h3>Jitter strips</h3>
+          <p>Turn on <strong>Show jitter under graphs</strong>, in More options (&#8943;), for a strip under each graph with jitter: how much the round trip changes from one reply to the next, on a scale of its own. With many hosts, lanes are too short for it, and hovering a graph shows jitter instead.</p>
         </li>
         <li>
           <h3>No admin rights, no installer</h3>
@@ -165,10 +177,11 @@
       <h2>Install</h2>
       <p><a href="https://github.com/sknnr-chad/ferrisping/releases/latest/download/ferrisping.exe">Download <code>ferrisping.exe</code></a> and run it. It runs on Windows 10 and 11. The <a href="https://github.com/sknnr-chad/ferrisping/releases/latest">latest release</a> on GitHub has its release notes and SHA-256.</p>
       <p class="callout">The exe isn't <a href="#code-signing-policy">code-signed</a> yet, so your browser may ask whether to keep it, and Windows SmartScreen may warn about it the first time: choose <strong>More info</strong>, then <strong>Run anyway</strong>.</p>
-      <p>It keeps your hosts, interval, time window, theme and network names in <code>%APPDATA%\FerrisPing</code>. Graphs and events are kept in memory only, so they start fresh each time. To uninstall FerrisPing, delete <code>ferrisping.exe</code> and that folder.</p>
+      <p>It keeps your hosts, interval, time window, theme, network names and alerts in <code>%APPDATA%\FerrisPing</code>. Graphs and events are kept in memory only, so they start fresh each time. To uninstall FerrisPing, delete <code>ferrisping.exe</code> and that folder.</p>
+      <p>Like any program with a tray icon, FerrisPing then shows up in Windows' own lists of tray icons (Settings &rsaquo; Personalization &rsaquo; Taskbar) and of programs that send notifications (Settings &rsaquo; System &rsaquo; Notifications, where you can turn its notifications off). Windows keeps those lists itself; FerrisPing doesn't write to the registry.</p>
       <h3>Command line</h3>
       <pre><code>ferrisping <span class="nw">[hosts...]</span> <span class="nw">[--interval 0.5]</span> <span class="nw">[--window 15m]</span> <span class="nw">[--theme dark|light|system]</span> <span class="nw">[--route &lt;host&gt;]</span></code></pre>
-      <p>Hosts given on the command line start a one-off session that isn't saved. <code>--route &lt;host&gt;</code> also opens that host's route.</p>
+      <p>Hosts given on the command line start a one-off session that isn't saved. <code>--route &lt;host&gt;</code> also opens that host's route. A session runs on its own, while starting FerrisPing again without hosts opens the copy that's already running, even from the tray.</p>
       <p>To build it yourself, see <a href="https://github.com/sknnr-chad/ferrisping#building-from-source">Building from source</a>.</p>
     </div>
   </section>
@@ -188,7 +201,7 @@
   <section id="next" class="section alt">
     <div class="wrap narrow">
       <h2>What's next</h2>
-      <p>FerrisPing is new. Windows comes first, and macOS and Linux are next. After that: alerts (tray, sound, email), saved host groups and TCP port checks. There are no dates.</p>
+      <p>FerrisPing is new. Windows comes first, and macOS and Linux are next. After that: email alerts, saved host groups and TCP port checks. There are no dates.</p>
       <p>Found a bug, or have an idea? <a href="https://github.com/sknnr-chad/ferrisping/issues">Open an issue on GitHub</a>. Pull requests are welcome too. FerrisPing is a small project looked after in spare time, so answers may take a while.</p>
     </div>
   </section>
