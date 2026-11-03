@@ -66,6 +66,9 @@ pub struct Palette {
     pub axis: Color32,
     pub accent: Color32,
     pub on_accent: Color32,
+    /// The jitter strip's line, under the round trips' accent line. Both themes use
+    /// the same magenta, which a color-blind reader can still tell from the accent.
+    pub jitter: Color32,
     pub good: Color32,
     pub warning: Color32,
     pub serious: Color32,
@@ -91,6 +94,7 @@ pub const DARK: Palette = Palette {
     axis: hex(0x383835),
     accent: hex(0x3987e5),
     on_accent: hex(0xffffff),
+    jitter: hex(0xd55181),
     good: hex(0x0ca30c),
     warning: hex(0xfab219),
     serious: hex(0xec835a),
@@ -112,6 +116,7 @@ pub const LIGHT: Palette = Palette {
     axis: hex(0xc3c2b7),
     accent: hex(0x2a78d6),
     on_accent: hex(0xffffff),
+    jitter: hex(0xd55181),
     good: hex(0x0ca30c),
     warning: hex(0xfab219),
     serious: hex(0xec835a),
@@ -134,6 +139,10 @@ pub fn font(size: f32) -> FontId {
 pub fn font_semibold(size: f32) -> FontId {
     FontId::new(size, semibold())
 }
+
+/// The narrowest a host's name is cut to, to fit its address beside it. Any
+/// narrower, and the address makes way instead.
+pub const NAME_MIN_WIDTH: f32 = 80.0;
 
 static HAS_ICONS: AtomicBool = AtomicBool::new(false);
 

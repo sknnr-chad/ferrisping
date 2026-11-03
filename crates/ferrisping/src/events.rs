@@ -12,6 +12,8 @@ use crate::format::{self, Clock};
 use crate::theme::{self, Palette};
 
 const ROW_HEIGHT: f32 = 50.0;
+/// Room between a host's name and its address.
+const ADDRESS_GAP: f32 = 6.0;
 
 pub fn show(ui: &mut Ui, state: &State, clock: &Clock, p: &Palette) {
     ui.horizontal(|ui| {
@@ -117,14 +119,16 @@ fn event_row(ui: &mut Ui, event: &Event, networks: &Networks, separator: bool, c
             format!("Round trips back to {} or less", format::ms_unit(*limit_ms)),
         ),
     };
+    // The host as it was when this was logged: its address too, when that's not its name.
+    let address = Some(&event.host_address).filter(|address| **address != event.host_name);
     // The row is painted rather than laid out, so tell screen readers what it says.
     let time = clock.day_time(event.at);
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::Role::Label,
-            true,
-            format!("{}, {time}: {message}", event.host_name),
-        )
+        let host = match address {
+            Some(address) => format!("{} ({address})", event.host_name),
+            None => event.host_name.clone(),
+        };
+        egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{host}, {time}: {message}"))
     });
     if let EventKind::ExitChanged { from, to } = event.kind {
         response.on_hover_text(format!(
@@ -157,15 +161,27 @@ fn event_row(ui: &mut Ui, event: &Event, networks: &Networks, separator: bool, c
         time,
         p.text_muted,
     );
-    let name_width = (rect.right() - time_width - 10.0 - text_left).max(20.0);
-    let name = truncated(
-        painter,
-        &event.host_name,
-        theme::font_semibold(13.5),
-        p.text,
-        name_width,
-    );
+    // The name is cut short to fit the address, which shows whole or not at all.
+    let room = (rect.right() - time_width - 10.0 - text_left).max(20.0);
+    let name_in = |width: f32| truncated(painter, &event.host_name, theme::font_semibold(13.5), p.text, width);
+    let address = address.map(|address| painter.layout_no_wrap(address.clone(), theme::font(12.5), p.text_muted));
+    let (name, address) = match address {
+        Some(address) => {
+            let width = room - ADDRESS_GAP - address.size().x;
+            let name = name_in(width.max(0.0));
+            if !name.elided || width >= theme::NAME_MIN_WIDTH {
+                (name, Some(address))
+            } else {
+                (name_in(room), None)
+            }
+        }
+        None => (name_in(room), None),
+    };
+    let address_left = text_left + name.size().x + ADDRESS_GAP;
     painter.galley(pos2(text_left, top - name.size().y / 2.0), name, p.text);
+    if let Some(address) = address {
+        painter.galley(pos2(address_left, top - address.size().y / 2.0), address, p.text_muted);
+    }
     let message = truncated(
         painter,
         &message,

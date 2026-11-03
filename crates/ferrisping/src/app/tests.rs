@@ -290,6 +290,63 @@ fn events_toggle_hides_and_shows_the_feed() {
     assert!(harness.state().show_events);
 }
 
+fn jitter_ticked(harness: &Harness<'_, FerrisPingApp>) -> bool {
+    harness.get_by_label(super::JITTER_LABEL).accesskit_node().toggled() == Some(Toggled::True)
+}
+
+#[test]
+fn jitter_is_off_until_the_menu_turns_it_on() {
+    // A normal run, which saves its settings.
+    let mut harness = app_saved(Args::default(), window::SIZE, answered());
+    assert!(!harness.state().show_jitter, "off by default");
+    open_more_options(&mut harness);
+    assert!(!jitter_ticked(&harness));
+    harness.get_by_label(super::JITTER_LABEL).click();
+    harness.run_steps(2);
+    assert!(harness.state().show_jitter);
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    drop(harness);
+
+    // The next start reads the settings the way every start does.
+    let mut harness = Harness::builder().with_size(window::SIZE).build_eframe(|cc| {
+        cc.storage = Some(&storage);
+        FerrisPingApp::new(cc, Args::default())
+    });
+    harness.run_steps(3);
+    assert!(harness.state().show_jitter, "it's kept");
+    open_more_options(&mut harness);
+    assert!(jitter_ticked(&harness));
+}
+
+#[test]
+fn the_hover_text_has_jitter_while_it_is_on() {
+    let mut harness = app_saved(Args::default(), window::SIZE, answered());
+    // A made-up host that's never probed, whose round trips go 10, 12, 10, 12 ms...
+    let monitor = &harness.state().monitor;
+    monitor.add_for_test(TargetSpec::new("192.0.2.10"));
+    let now = now_secs();
+    monitor.edit_for_test(|state| {
+        let history = &mut state.hosts[0].history;
+        for ago in (1..=90).rev() {
+            let seq = history.push_pending(now - f64::from(ago));
+            let rtt_ms = if ago % 2 == 0 { 10.0 } else { 12.0 };
+            history.complete(seq, Outcome::Reply { rtt_ms });
+        }
+    });
+    harness.run_steps(2);
+    let jitter_shown = |harness: &mut Harness<'_, FerrisPingApp>| {
+        harness.hover_at(graph_point(harness, "192.0.2.10"));
+        harness.run_steps(2);
+        harness.query_by_label_contains("Jitter 2.0 ms").is_some()
+    };
+    assert!(!jitter_shown(&mut harness));
+
+    harness.state_mut().show_jitter = true;
+    harness.run_steps(2);
+    assert!(jitter_shown(&mut harness));
+}
+
 #[test]
 fn trace_route_from_the_lane_menu_then_restart_and_close() {
     let mut harness = app("127.0.0.1");
@@ -578,6 +635,7 @@ fn a_switch_to_another_isp_is_logged() {
             at,
             host: host.id,
             host_name: host.name().to_string(),
+            host_address: host.address(),
             kind: EventKind::ExitChanged { from: 3356, to: 7922 },
         };
         state.events.push(event);
@@ -647,39 +705,160 @@ fn a_dozen_hosts_fit_on_a_laptop_screen() {
     harness.get_by_label("Avg");
 }
 
-#[test]
-fn a_lanes_address_shows_whole_or_not_at_all() {
-    // With a label the lane shows the address too, after the network.
-    let mut harness = app("127.0.0.1 Office edge");
-    wait_for(&mut harness, "a reply", |h| {
-        h.state()
-            .monitor
-            .read()
-            .hosts
-            .iter()
-            .all(|h| h.status == HostStatus::Up)
-    });
-    let now = now_secs();
-    harness.state().monitor.edit_for_test(|state| {
-        let first = router("68.86.0.1");
-        state.networks.insert_for_test(first, 7922, COMCAST);
-        state.hosts[0].exit = Some(Exit {
-            asn: 7922,
-            router: first,
-            hop: 3,
-            since: now,
-            seen: now,
-        });
-    });
-    harness.run_steps(2);
-    let address = |h: &Harness<'_, FerrisPingApp>| h.query_all_by_label_contains("127.0.0.1").next().is_some();
-    assert!(address(&harness), "the address fits beside the status and the network");
+/// Whether `address` shows on the same line as `name`, after it.
+fn beside(harness: &Harness<'_, FerrisPingApp>, name: &str, address: &str) -> bool {
+    let name = lane_name(harness, name);
+    let address = lane_name(harness, address);
+    address.left() >= name.right() && (address.center().y - name.center().y).abs() < 2.0
+}
 
-    // The lane's buttons take the room, so the address steps aside instead of showing "·…".
+#[test]
+fn a_name_shows_its_address_beside_it() {
+    let long = "A name much too long to fit beside its address";
+    let mut harness = app(&format!("127.0.0.1 Office edge, 127.0.0.2 {long}, 127.0.0.3"));
+    wait_for(&mut harness, "the addresses", addresses_known);
+    harness.run_steps(2);
+    assert!(beside(&harness, "Office edge", "127.0.0.1"));
+    // A long name is cut short, so the address shows whole.
+    assert!(beside(&harness, long, "127.0.0.2"));
+    assert_eq!(
+        harness.query_all_by_label("127.0.0.3").count(),
+        1,
+        "a host added by its address shows it once"
+    );
+
+    // The lane's buttons don't push it out.
     harness.hover_at(graph_point(&harness, "Office edge"));
     harness.run_steps(2);
     harness.get_by_label("Trace route to Office edge");
-    assert!(!address(&harness), "no cut-off address");
+    assert!(beside(&harness, "Office edge", "127.0.0.1"));
+
+    // So do the events.
+    harness.state().monitor.edit_for_test(|state| {
+        let host = &state.hosts[0];
+        let event = Event {
+            at: now_secs(),
+            host: host.id,
+            host_name: host.name().to_string(),
+            host_address: host.address(),
+            kind: EventKind::Down,
+        };
+        state.events.push(event);
+    });
+    harness.run_steps(2);
+    assert!(harness.query_by_label_contains("Office edge (127.0.0.1), ").is_some());
+}
+
+#[test]
+fn a_compact_lane_shows_the_address_too() {
+    let mut hosts: Vec<String> = (2..=12).map(|i| format!("127.0.0.{i}")).collect();
+    hosts.insert(0, "127.0.0.1 Office edge".into());
+    let args = Args {
+        hosts: parse_targets(&hosts.join(", ")),
+        ..Args::default()
+    };
+    let mut harness = app_sized(args, vec2(1180.0, 712.0));
+    wait_for(&mut harness, "the addresses", addresses_known);
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Avg").is_none(), "compact lanes");
+    assert!(beside(&harness, "Office edge", "127.0.0.1"));
+    // The address has the name's tooltip, numbers and all.
+    harness.hover_at(lane_name(&harness, "127.0.0.1").center());
+    harness.run_steps(40);
+    harness.get_by_label("Avg");
+}
+
+/// Opens the rename dialog from the menu of the lane named `name`.
+fn rename_lane(harness: &mut Harness<'_, FerrisPingApp>, name: &str) {
+    click_at(harness, lane_name(harness, name).center(), PointerButton::Secondary);
+    harness.run_steps(2);
+    harness.get_by_label("Rename…").click();
+    // A dialog stays hidden for its first frame, while egui measures it.
+    harness.run_steps(4);
+}
+
+#[test]
+fn a_host_renamed_from_its_lane_keeps_its_graph_and_its_new_name() {
+    // A normal run, which saves its hosts.
+    let mut harness = app("");
+    let id = harness.state().monitor.add(TargetSpec::new("127.0.0.1"));
+    wait_for(&mut harness, "a reply", |h| {
+        h.state().monitor.read().hosts[0].status == HostStatus::Up
+    });
+    let samples = |h: &Harness<'_, FerrisPingApp>| h.state().monitor.read().host(id).map(|host| host.history.len());
+    let before = samples(&harness).unwrap();
+
+    rename_lane(&mut harness, "127.0.0.1");
+    harness.get_by_label("Name this host");
+    // Commas separate hosts in the add box, but a name given here can have them.
+    harness.get_by_label("Host name").type_text("Gateway, 2nd floor");
+    harness.run_steps(1);
+    harness.get_by_label("Save").click();
+    harness.run_steps(2);
+    assert!(harness.state().rename.is_none(), "the dialog closes");
+    assert!(beside(&harness, "Gateway, 2nd floor", "127.0.0.1"));
+    assert!(samples(&harness).unwrap() >= before, "the host keeps its samples");
+
+    // The name is saved with the host, and comes back as it was.
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    let saved: Saved = eframe::get_value(&storage, STORAGE_KEY).expect("settings were saved");
+    assert_eq!(saved.hosts, ["127.0.0.1 Gateway, 2nd floor"]);
+    let mut next = Harness::builder().with_size(window::SIZE).build_eframe(|cc| {
+        cc.storage = Some(&storage);
+        FerrisPingApp::new(cc, Args::default())
+    });
+    next.run_steps(3);
+    let specs: Vec<TargetSpec> = next
+        .state()
+        .monitor
+        .read()
+        .hosts
+        .iter()
+        .map(|h| h.spec.clone())
+        .collect();
+    assert_eq!(
+        specs,
+        parse_targets("127.0.0.1 Gateway")
+            .into_iter()
+            .map(|spec| TargetSpec {
+                label: Some("Gateway, 2nd floor".into()),
+                ..spec
+            })
+            .collect::<Vec<_>>()
+    );
+    drop(next);
+
+    // And back to the address.
+    rename_lane(&mut harness, "Gateway, 2nd floor");
+    harness.get_by_label("Use its address").click();
+    harness.run_steps(2);
+    assert_eq!(hosts(&harness), ["127.0.0.1"]);
+    assert_eq!(harness.state().monitor.read().hosts[0].spec.label, None);
+    assert_eq!(harness.query_all_by_label("127.0.0.1").count(), 1);
+}
+
+#[test]
+fn a_saved_block_too_big_to_ping_comes_back_as_one_host_that_says_why() {
+    // The add box expands blocks and ranges, so one saved as typed is one it couldn't.
+    let saved = Saved {
+        hosts: vec!["10.0.0.0/16 Lab".into()],
+        ..answered()
+    };
+    let mut harness = app_saved(Args::default(), window::SIZE, saved);
+    wait_for(&mut harness, "the lookup", |h| {
+        h.state().monitor.read().hosts[0].status == HostStatus::ResolveFailed
+    });
+    harness.run_steps(2);
+    assert_eq!(hosts(&harness), ["10.0.0.0/16"]);
+    assert!(beside(&harness, "Lab", "10.0.0.0/16"));
+    harness.get_by_label("Can't resolve");
+    // The lane shows why where its graph would be, and the events list has it too.
+    let why = "Too many addresses: the biggest block is a /24";
+    let error = harness.state().monitor.read().hosts[0].resolve_error.clone();
+    assert_eq!(error.as_deref(), Some(why));
+    let event = format!("Can't resolve: {why}");
+    assert!(harness.query_by_label_contains(&event).is_some());
 }
 
 #[test]
@@ -1173,6 +1352,7 @@ fn crossed_limits_are_logged_in_events() {
             at: now_secs(),
             host: host.id,
             host_name: host.name().to_string(),
+            host_address: host.address(),
             kind: EventKind::Loss {
                 lost: 4,
                 pings: 30,
@@ -1216,8 +1396,16 @@ fn render_states() {
     click_at(&harness, name, PointerButton::Secondary);
     harness.run_steps(3);
     harness.render().unwrap().save(dir.join("ui-context-menu.png")).unwrap();
-    harness.key_press(egui::Key::Escape);
-    harness.run_steps(2);
+
+    // Naming a host, and its lane with the name.
+    harness.get_by_label("Rename…").click();
+    harness.run_steps(4);
+    harness.get_by_label("Host name").type_text("Branch gateway");
+    harness.run_steps(3);
+    harness.render().unwrap().save(dir.join("ui-rename.png")).unwrap();
+    harness.get_by_label("Save").click();
+    harness.run_steps(3);
+    harness.render().unwrap().save(dir.join("ui-renamed.png")).unwrap();
 
     interval_picker(&harness).click();
     harness.run_steps(3);
@@ -1286,7 +1474,7 @@ fn render_states() {
 #[ignore = "writes an image; run by hand"]
 fn render_switch() {
     let dir = std::path::PathBuf::from(std::env::var("FERRISPING_RENDER_DIR").expect("set FERRISPING_RENDER_DIR"));
-    let mut harness = app("127.0.0.1, 127.0.0.2");
+    let mut harness = app("127.0.0.1 Office edge, 127.0.0.2 Branch gateway");
     for _ in 0..200 {
         std::thread::sleep(Duration::from_millis(100));
         harness.step();
@@ -1320,6 +1508,7 @@ fn render_switch() {
             at,
             host: host.id,
             host_name: host.name().to_string(),
+            host_address: host.address(),
             kind: EventKind::ExitChanged { from: 3356, to: 7922 },
         };
         state.events.push(event);
@@ -1491,6 +1680,7 @@ fn rolling_update(harness: &Harness<'_, FerrisPingApp>) {
                     at,
                     host: host.id,
                     host_name: host.name().to_string(),
+                    host_address: host.address(),
                     kind,
                 };
                 events.push(event(now - went, EventKind::Down));
@@ -1584,4 +1774,75 @@ fn route_to_cloudflare(harness: &mut Harness<'_, FerrisPingApp>) {
     trace.name_for_test(target, "one.one.one.one");
     let host = monitor.read().hosts[1].id;
     harness.state_mut().route = Some(RouteView { host, trace });
+}
+
+/// Renders made-up hosts near and far with jitter on: six full lanes, the same six
+/// compact, the last minute, and three lanes at their tallest, in both themes.
+/// Nothing is probed:
+/// `FERRISPING_RENDER_DIR=<dir> cargo test -p ferrisping -- --ignored render_jitter`
+#[test]
+#[ignore = "writes images; run by hand"]
+fn render_jitter() {
+    let dir = std::path::PathBuf::from(std::env::var("FERRISPING_RENDER_DIR").expect("set FERRISPING_RENDER_DIR"));
+    // Each host's round trip and how much it varies, then how much it varied between
+    // 9 and 6 minutes ago.
+    let hosts = [
+        ("192.0.2.1 Gateway", 0.6, 0.3, 0.3),
+        ("192.0.2.20 File server", 1.8, 0.5, 2.5),
+        ("198.51.100.25 Hosted phones", 28.0, 1.0, 12.0),
+        ("198.51.100.80 Branch office", 45.0, 4.0, 4.0),
+        ("203.0.113.90 Frankfurt VPN", 120.0, 12.0, 12.0),
+        ("203.0.113.40 Sydney office", 150.0, 2.0, 2.0),
+    ];
+    let all: &[usize] = &[0, 1, 2, 3, 4, 5];
+    for (theme, name) in [(ThemeChoice::Dark, "dark"), (ThemeChoice::Light, "light")] {
+        for (lanes, height, window_secs, picked) in [
+            ("full", 800.0, 15 * 60, all),
+            ("compact", 560.0, 15 * 60, all),
+            ("minute", 800.0, 60, all),
+            ("tall", 800.0, 15 * 60, &[0, 2, 5][..]),
+        ] {
+            let mut harness = screenshot_app(theme, window_secs, vec2(1180.0, height));
+            harness.state_mut().show_jitter = true;
+            let monitor = &harness.state().monitor;
+            for &i in picked {
+                monitor.add_for_test(parse_targets(hosts[i].0).remove(0));
+            }
+            let now = now_secs();
+            monitor.edit_for_test(|state| {
+                for (host, &i) in state.hosts.iter_mut().zip(picked) {
+                    let (_, base_ms, spread_ms, burst_ms) = hosts[i];
+                    let mut calm = Jitter::new(i as u64 + 41, base_ms, spread_ms);
+                    let mut rough = Jitter::new(i as u64 + 51, base_ms, burst_ms);
+                    host.addr = host.spec.host.parse().ok();
+                    for ago in (0..15 * 60).rev() {
+                        let seq = host.history.push_pending(now - f64::from(ago) - 0.5);
+                        let jitter = if (360..540).contains(&ago) {
+                            &mut rough
+                        } else {
+                            &mut calm
+                        };
+                        let outcome = Outcome::Reply {
+                            rtt_ms: jitter.next_ms(),
+                        };
+                        host.history.complete(seq, outcome);
+                    }
+                    (host.status, host.status_since) = (HostStatus::Up, now - 3.0 * 3600.0);
+                    host.version += 1;
+                }
+            });
+            harness.run_steps(3);
+            // Point at the hosted phones while their round trips were all over the place,
+            // or at a compact lane's name for its numbers.
+            if lanes == "compact" {
+                harness.hover_at(lane_name(&harness, "Hosted phones").center());
+                harness.run_steps(40);
+            } else {
+                harness.hover_at(graph_point(&harness, "Hosted phones"));
+                harness.run_steps(3);
+            }
+            let file = dir.join(format!("jitter-{lanes}-{name}.png"));
+            harness.render().unwrap().save(file).unwrap();
+        }
+    }
 }

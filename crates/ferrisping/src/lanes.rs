@@ -3,6 +3,8 @@
 //! With many hosts the lanes get shorter, then compact: the numbers move to a
 //! tooltip, so a dozen hosts fit on a laptop screen.
 
+use std::cell::RefCell;
+
 use eframe::egui::{
     self, Align, Align2, Button, CornerRadius, Frame, Id, Label, Layout, Rect, Response, RichText, Sense, Stroke, Ui,
     UiBuilder, pos2, vec2,
@@ -34,8 +36,13 @@ const Y_AXIS_WIDTH: f32 = 30.0;
 /// The plot's minimum grid spacing in points. egui_plot passes the grid spacer
 /// `base_step_size` = plot units per point × this, so the spacer divides it back out.
 const GRID_MIN_SPACING: f32 = 8.0;
+/// The jitter strip under a full lane's graph takes a fifth of the graph's room,
+/// between these heights, with a gap above it.
+const STRIP_MIN_HEIGHT: f32 = 18.0;
+const STRIP_MAX_HEIGHT: f32 = 28.0;
+const STRIP_GAP: f32 = 6.0;
 
-/// The time range to draw this frame.
+/// The time range to draw this frame, and what to draw in it.
 pub struct View {
     pub now: f64,
     /// Visible range. In live mode the graphs are set to it; otherwise the graphs
@@ -45,6 +52,8 @@ pub struct View {
     pub live: bool,
     /// Current probe interval in seconds.
     pub interval: f64,
+    /// Show jitter: in a strip under each full lane's graph, and in the graphs' hover text.
+    pub jitter: bool,
 }
 
 /// A change the user asked for, applied after the state lock is released.
@@ -54,6 +63,8 @@ pub enum LaneAction {
     Move(HostId, usize),
     Copy(String),
     TraceRoute(HostId),
+    /// Give the host a name of the user's choosing.
+    Rename(HostId),
     /// Give a network (by AS number) a name of the user's choosing.
     RenameNetwork(u32),
     /// Open the host's Alerts dialog.
@@ -220,11 +231,13 @@ fn info(
     // being taken by a text selection.
     ui.style_mut().interaction.selectable_labels = false;
 
-    // Name, with the latest round trip on the right. A compact lane has no room
-    // for the numbers, so the name's tooltip has them.
+    // Name and address, with the latest round trip on the right, far enough off that
+    // the two numbers don't run together. A compact lane has no room for the other
+    // numbers, so the name's tooltip has them.
     let (name_size, ms_size) = if compact { (14.0, 15.0) } else { (15.0, 19.0) };
     egui::Sides::new()
         .height(if compact { 20.0 } else { 24.0 })
+        .spacing(16.0)
         .shrink_left()
         .truncate()
         .show(
@@ -232,10 +245,7 @@ fn info(
             |ui| {
                 let (icon, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
                 theme::paint_status_icon(ui.painter(), icon.center(), 11.0, host.status, p);
-                let name = RichText::new(host.name())
-                    .font(theme::font_semibold(name_size))
-                    .color(p.text);
-                let name = ui.add(Label::new(name).truncate());
+                let name = name_and_address(ui, host, name_size, p);
                 if compact {
                     name.on_hover_ui(|ui| {
                         ui.label(full_name(host));
@@ -268,9 +278,8 @@ fn info(
             },
         );
 
-    // Status, the network the traffic leaves through and the address, with buttons
-    // while the pointer is over the lane. The address goes last, and only whole: it's
-    // in the name's tooltip too, and a cut-off address says nothing.
+    // Status and the network the traffic leaves through, with buttons while the
+    // pointer is over the lane.
     egui::Sides::new().height(18.0).shrink_left().truncate().show(
         &mut ui,
         |ui| {
@@ -281,18 +290,6 @@ fn info(
             if let Some(exit) = &host.exit {
                 ui.add(Label::new(line("  ·  ".into())));
                 exit_label(ui, host, exit, networks, now, clock, p);
-            }
-            if let Some(addr) = host.addr.map(|a| a.to_string()).filter(|a| *a != host.name()) {
-                let text = egui::WidgetText::from(line(format!("  ·  {addr}")));
-                let galley = text.into_galley(
-                    ui,
-                    Some(egui::TextWrapMode::Truncate),
-                    ui.available_width(),
-                    egui::FontSelection::Default,
-                );
-                if !galley.elided {
-                    ui.add(Label::new(galley));
-                }
             }
         },
         |ui| {
@@ -368,6 +365,37 @@ fn numbers(ui: &mut Ui, id: impl egui::AsIdSalt, stats: &WindowStats, p: &Palett
         });
 }
 
+/// The host's name, and its address beside it in muted text when that's something
+/// else. The name is cut short to fit the address, which shows whole or not at all:
+/// a cut-off address says nothing, and the name's tooltip has it anyway.
+fn name_and_address(ui: &mut Ui, host: &Host, size: f32, p: &Palette) -> Response {
+    let name = RichText::new(host.name())
+        .font(theme::font_semibold(size))
+        .color(p.text);
+    let address = host.address();
+    if address == host.name() {
+        return ui.add(Label::new(name).truncate());
+    }
+    let address = egui::WidgetText::from(RichText::new(address).size(13.0).color(p.text_muted)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::FontSelection::Default,
+    );
+    let room = ui.available_width() - ui.spacing().item_spacing.x - address.size().x;
+    let cut = egui::WidgetText::from(name.clone()).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        room.max(0.0),
+        egui::FontSelection::Default,
+    );
+    if cut.elided && room < theme::NAME_MIN_WIDTH {
+        return ui.add(Label::new(name).truncate());
+    }
+    let name = ui.add(Label::new(cut));
+    name.union(ui.add(Label::new(address)))
+}
+
 fn full_name(host: &Host) -> String {
     let mut text = host.spec.host.clone();
     if let Some(label) = &host.spec.label {
@@ -435,7 +463,8 @@ fn status_text(host: &Host, now: f64) -> String {
     }
 }
 
-/// The latency graph. Returns its response and its screen transform.
+/// The latency graph, and the jitter strip under it while that's on. Returns their
+/// response and the graph's screen transform.
 #[allow(clippy::too_many_arguments)]
 fn graph(
     ui: &mut Ui,
@@ -448,10 +477,21 @@ fn graph(
     p: &'static Palette,
     out: &mut LanesOutput,
 ) -> Option<(Response, PlotTransform)> {
+    // A full lane's graph gives the bottom of its room to the jitter strip, so lanes
+    // keep their height and go compact at the same count. A compact lane's graph is
+    // too short to share.
+    let strip = view.jitter && style == LaneStyle::Full;
+    let (rect, strip_rect) = if strip {
+        let height = (rect.height() * 0.2).round().clamp(STRIP_MIN_HEIGHT, STRIP_MAX_HEIGHT);
+        let top = rect.bottom() - height;
+        let graph = Rect::from_min_max(rect.min, pos2(rect.right(), top - STRIP_GAP));
+        (graph, Some(Rect::from_min_max(pos2(rect.left(), top), rect.max)))
+    } else {
+        (rect, None)
+    };
     let mut plot_ui = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
     let history: &History = &host.history;
     let interval = view.interval;
-    let grid_clock = clock.clone();
     let points_wide = (rect.width() - Y_AXIS_WIDTH).max(50.0);
     let secs_per_point = (view.t1 - view.t0) / points_wide as f64;
     let (live, t0, t1) = (view.live, view.t0, view.t1);
@@ -467,6 +507,22 @@ fn graph(
         })
         .collect();
     let switches = &switches;
+    let jitter = view.jitter;
+    // The jitter line as built with the graph, for the strip to draw and for the
+    // hover text, which egui_plot asks for once the lines are in.
+    let drawn_jitter = RefCell::new(Vec::new());
+    let drawn_jitter = &drawn_jitter;
+    let hover = move |pos: &HoverPosition<'_>| {
+        hover_text(
+            pos,
+            history,
+            &drawn_jitter.borrow(),
+            switches,
+            clock,
+            interval,
+            secs_per_point,
+        )
+    };
     // A compact lane's graph is too short for a label half way up: egui_plot hides
     // labels that crowd together, all of them, and the graph would have no scale.
     let steps = match style {
@@ -474,20 +530,8 @@ fn graph(
         LaneStyle::Compact => 1,
     };
 
-    let plot = Plot::new(("lane", host.id.0))
-        .width(rect.width())
-        .height(rect.height())
-        .show_background(false)
+    let plot = timeline_plot(("lane", host.id.0), rect, link, clock, p)
         .show_axes([false, true])
-        .show_grid([true, true])
-        .grid_color(p.grid)
-        .grid_spacing(GRID_MIN_SPACING..=300.0)
-        .x_grid_spacer(move |input: GridInput| {
-            let secs_per_point = input.base_step_size / GRID_MIN_SPACING as f64;
-            series::time_marks(input.bounds.0, input.bounds.1, secs_per_point, |t| {
-                grid_clock.utc_offset_secs(t)
-            })
-        })
         .y_grid_spacer(move |input: GridInput| series::latency_marks(input.bounds.1, steps))
         // Latency scale on the right, next to the newest samples.
         .custom_y_axes(vec![
@@ -498,19 +542,7 @@ fn graph(
                 .tick_label_color(p.text_muted)
                 .tick_label_font(theme::font(11.5)),
         ])
-        .link_axis(link, [true, false])
-        .link_cursor(link, [true, false])
-        .show_x(true)
-        .show_y(false)
-        .cursor_color(p.text_muted)
-        .allow_scroll(false)
-        .allow_zoom([true, false])
-        .allow_drag([true, false])
-        .allow_axis_zoom_drag(false)
-        .allow_boxed_zoom(false)
-        .allow_double_click_reset(false)
-        .set_margin_fraction(vec2(0.0, 0.0))
-        .label_formatter(move |pos| hover_text(pos, history, switches, clock, interval, secs_per_point));
+        .label_formatter(hover);
 
     let line_color = p.accent;
     let loss_fill = p.critical.gamma_multiply(0.32);
@@ -525,7 +557,7 @@ fn graph(
             let bounds = pui.plot_bounds();
             (bounds.min()[0], bounds.max()[0])
         };
-        let series = series::build(history, lo, hi, points_wide as usize, interval);
+        let series = series::build(history, lo, hi, points_wide as usize, interval, jitter);
         let top = series::latency_top(series.max_ms);
         pui.set_plot_bounds_y(0.0..=top);
         // A switch to another network: a dashed line where it happened, named at the
@@ -577,6 +609,7 @@ fn graph(
                 );
             }
         }
+        *drawn_jitter.borrow_mut() = series.jitter;
     });
 
     if history.last_finished().is_none() {
@@ -597,19 +630,123 @@ fn graph(
         );
     }
 
-    let r = &response.response;
+    let mut r = response.response;
+    if let Some(strip_rect) = strip_rect {
+        // As wide as the graph's plot area, so a moment sits at the same x in both.
+        let rect = Rect::from_x_y_ranges(response.transform.frame().x_range(), strip_rect.y_range());
+        let plot = timeline_plot(("jitter", host.id.0), rect, link, clock, p).label_formatter(hover);
+        r = r.union(jitter_strip(
+            ui,
+            rect,
+            plot,
+            &response.transform,
+            &drawn_jitter.borrow(),
+            view,
+            p,
+        ));
+    }
     if r.dragged() || (r.hovered() && ui.input(|i| i.zoom_delta() != 1.0)) {
         out.left_live = true;
     }
     if r.double_clicked() {
         out.go_live = true;
     }
-    Some((response.response, response.transform))
+    Some((r, response.transform))
+}
+
+/// A plot on the lanes' shared time axis. Dragging and zooming move it in time
+/// only, and its range and cursor stay in step with every other lane's.
+fn timeline_plot<'a>(id: impl egui::AsIdSalt, rect: Rect, link: Id, clock: &Clock, p: &Palette) -> Plot<'a> {
+    let clock = clock.clone();
+    Plot::new(id)
+        .width(rect.width())
+        .height(rect.height())
+        .show_background(false)
+        .show_grid([true, true])
+        .grid_color(p.grid)
+        .grid_spacing(GRID_MIN_SPACING..=300.0)
+        .x_grid_spacer(move |input: GridInput| {
+            let secs_per_point = input.base_step_size / GRID_MIN_SPACING as f64;
+            series::time_marks(input.bounds.0, input.bounds.1, secs_per_point, |t| {
+                clock.utc_offset_secs(t)
+            })
+        })
+        .link_axis(link, [true, false])
+        .link_cursor(link, [true, false])
+        .show_x(true)
+        .show_y(false)
+        .cursor_color(p.text_muted)
+        .allow_scroll(false)
+        .allow_zoom([true, false])
+        .allow_drag([true, false])
+        .allow_axis_zoom_drag(false)
+        .allow_boxed_zoom(false)
+        .allow_double_click_reset(false)
+        .set_margin_fraction(vec2(0.0, 0.0))
+}
+
+/// Jitter's own strip under a full lane's graph: the jitter line on a scale of its
+/// own, named in the corner with that scale.
+fn jitter_strip(
+    ui: &mut Ui,
+    rect: Rect,
+    plot: Plot<'_>,
+    graph: &PlotTransform,
+    jitter: &[Vec<[f64; 2]>],
+    view: &View,
+    p: &Palette,
+) -> Response {
+    let bounds = graph.bounds();
+    let top = series::latency_top(series::jitter_max(jitter, bounds.min()[0], bounds.max()[0]));
+    let (live, t0, t1) = (view.live, view.t0, view.t1);
+    let color = p.jitter;
+    let mut strip_ui = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+    let response = plot
+        .show_axes([false, false])
+        .y_grid_spacer(|input: GridInput| series::latency_marks(input.bounds.1, 1))
+        .show(&mut strip_ui, |pui| {
+            if live {
+                pui.set_plot_bounds_x(t0..=t1);
+            }
+            pui.set_plot_bounds_y(0.0..=top);
+            for (i, run) in jitter.iter().enumerate() {
+                let points = PlotPoints::from(run.clone());
+                if run.len() == 1 {
+                    pui.points(
+                        Points::new("Jitter", points)
+                            .id(("jitter-dot", i))
+                            .radius(1.5)
+                            .color(color),
+                    );
+                } else {
+                    pui.line(
+                        Line::new("Jitter", points)
+                            .id(("jitter", i))
+                            .color(color)
+                            .width(1.5)
+                            .fill(0.0)
+                            .fill_alpha(0.12),
+                    );
+                }
+            }
+        })
+        .response;
+    // The scale goes in the name rather than on the right, where it would read as the
+    // end of the graph's. A backing keeps the name readable over the line.
+    let painter = ui.painter();
+    let name = format!("Jitter · 0–{} ms", series::latency_tick(top));
+    let galley = painter.layout_no_wrap(name, theme::font(11.5), p.text_muted);
+    let pos = rect.left_top() + vec2(4.0, 1.0);
+    let backing = Rect::from_min_size(pos, galley.size()).expand2(vec2(3.0, 0.0));
+    painter.rect_filled(backing, CornerRadius::same(3), p.surface.gamma_multiply(0.8));
+    painter.galley(pos, galley, p.text_muted);
+    response
 }
 
 fn hover_text(
     pos: &HoverPosition<'_>,
     history: &History,
+    jitter: &[Vec<[f64; 2]>],
     switches: &[Switch],
     clock: &Clock,
     interval: f64,
@@ -621,7 +758,12 @@ fn hover_text(
     let max_dt = (interval * 0.75).max(secs_per_point * 4.0);
     let text = match series::nearest(history, t, max_dt) {
         Some(sample) => match sample.outcome {
-            Outcome::Reply { rtt_ms } => Some(format!("{}\n{}", format::ms_unit(rtt_ms), clock.time(sample.t))),
+            Outcome::Reply { rtt_ms } => {
+                let jitter = series::jitter_near(jitter, sample.t, max_dt)
+                    .map(|ms| format!("\nJitter {}", format::ms_unit(ms)))
+                    .unwrap_or_default();
+                Some(format!("{}{jitter}\n{}", format::ms_unit(rtt_ms), clock.time(sample.t)))
+            }
             Outcome::Lost(status) => Some(format!("No reply: {}\n{}", status.label(), clock.time(sample.t))),
             Outcome::Pending => None,
         },
@@ -666,10 +808,15 @@ fn lane_menu(response: &Response, host: &Host, networks: &Networks, index: usize
             ui.close();
         }
         ui.separator();
-        let address = host
-            .addr
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| host.spec.host.clone());
+        if ui
+            .button("Rename…")
+            .on_hover_text("Give this host a name of your own. Its address stays beside the name.")
+            .clicked()
+        {
+            out.actions.push(LaneAction::Rename(host.id));
+            ui.close();
+        }
+        let address = host.address();
         if ui.button(format!("Copy {address}")).clicked() {
             out.actions.push(LaneAction::Copy(address));
             ui.close();

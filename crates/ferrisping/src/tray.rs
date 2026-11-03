@@ -379,6 +379,7 @@ mod tests {
                 at: 0.0,
                 host: HostId(1),
                 host_name: name.to_string(),
+                host_address: "192.0.2.10".to_string(),
                 kind,
             },
             addr: Some("192.0.2.10".parse::<IpAddr>().unwrap()),
