@@ -11,7 +11,7 @@ Add the hosts you care about, and FerrisPing pings each one in a lane of its own
 time axis, so you can see which host dropped out and when. It's made for jobs like watching servers restart one
 by one during a rolling update, or keeping an eye on a flaky link.
 
-FerrisPing is new (version 0.2). It runs on Windows 10 and 11; macOS and Linux are planned.
+FerrisPing is new (version 0.3). It runs on Windows 10 and 11; macOS and Linux are planned.
 
 ## Features
 
