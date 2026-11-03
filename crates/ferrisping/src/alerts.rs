@@ -249,10 +249,8 @@ impl HostAlertsDialog {
         Self {
             host: host.id,
             name: host.name().to_string(),
-            address: host
-                .addr
-                .map(|addr| addr.to_string())
-                .filter(|addr| *addr != host.name()),
+            // As the lane shows it beside the name.
+            address: Some(host.address()).filter(|address| address != host.name()),
             pick,
             limits,
         }

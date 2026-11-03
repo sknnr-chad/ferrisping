@@ -1344,6 +1344,59 @@ fn a_host_can_have_alerts_of_its_own() {
 }
 
 #[test]
+fn a_renamed_host_keeps_its_alerts() {
+    let saved = Saved {
+        host_alerts: BTreeMap::from([("127.0.0.1".to_string(), HostChoice::Off)]),
+        ..saved_hosts(&["127.0.0.1"])
+    };
+    let mut harness = app_saved(Args::default(), window::SIZE, saved);
+    rename_lane(&mut harness, "127.0.0.1");
+    harness.get_by_label("Host name").type_text("Branch gateway");
+    harness.run_steps(1);
+    harness.get_by_label("Save").click();
+    harness.run_steps(2);
+
+    // Its dialog goes by the new name, with the address under it as in its lane.
+    click_at(
+        &harness,
+        lane_name(&harness, "Branch gateway").center(),
+        PointerButton::Secondary,
+    );
+    harness.run_steps(2);
+    harness.get_by_label("Alerts…").click();
+    harness.run_steps(4);
+    harness.get_by_label("Alerts for Branch gateway");
+    assert_eq!(
+        harness.query_all_by_label("127.0.0.1").count(),
+        2,
+        "in the lane and in the dialog"
+    );
+    assert_eq!(
+        harness.get_by_label("None for this host").accesskit_node().toggled(),
+        Some(Toggled::True)
+    );
+    harness.get_by_label("Cancel").click();
+    harness.run_steps(2);
+
+    // They're saved with the host's new line, and come back with it.
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    let saved: Saved = eframe::get_value(&storage, STORAGE_KEY).expect("settings were saved");
+    assert_eq!(saved.hosts, ["127.0.0.1 Branch gateway"]);
+    assert_eq!(
+        saved.host_alerts,
+        BTreeMap::from([("127.0.0.1 Branch gateway".to_string(), HostChoice::Off)])
+    );
+    drop(harness);
+    let mut harness = Harness::builder().with_size(window::SIZE).build_eframe(|cc| {
+        cc.storage = Some(&storage);
+        FerrisPingApp::new(cc, Args::default())
+    });
+    harness.run_steps(2);
+    assert_eq!(harness.state().monitor.read().hosts[0].alerts, HostAlerts::Off);
+}
+
+#[test]
 fn crossed_limits_are_logged_in_events() {
     let mut harness = app("127.0.0.1");
     harness.state().monitor.edit_for_test(|state| {
@@ -1426,8 +1479,31 @@ fn render_states() {
     harness.run_steps(2);
     harness.render().unwrap().save(dir.join("ui-notice.png")).unwrap();
 
-    // The menu with a tray icon, and the Alerts dialogs.
-    let mut harness = app_with_tray(saved_hosts(&["127.0.0.1"]));
+    // The menu with a tray icon, and the Alerts dialogs, over made-up hosts with
+    // names and jitter strips. Nothing is probed.
+    let mut harness = screenshot_app(ThemeChoice::Dark, 15 * 60, vec2(1180.0, 800.0));
+    harness.state_mut().show_jitter = true;
+    let tray = Tray::detached(&harness.ctx);
+    harness.state_mut().attach_tray(tray);
+    let hosts = [
+        ("192.0.2.1 Gateway", 0.6, 0.3),
+        ("192.0.2.20 File server", 1.8, 0.5),
+        ("198.51.100.25 Hosted phones", 28.0, 6.0),
+        ("198.51.100.80", 45.0, 4.0),
+    ];
+    let monitor = &harness.state().monitor;
+    for (input, ..) in hosts {
+        monitor.add_for_test(parse_targets(input).remove(0));
+    }
+    let now = now_secs();
+    monitor.edit_for_test(|state| {
+        for (i, (host, &(_, base_ms, spread_ms))) in state.hosts.iter_mut().zip(&hosts).enumerate() {
+            let jitter = Jitter::new(i as u64 + 61, base_ms, spread_ms);
+            make_up_samples(host, now, 15 * 60, jitter, |_| false);
+            (host.status, host.status_since) = (HostStatus::Up, now - 3.0 * 3600.0);
+        }
+    });
+    harness.run_steps(3);
     open_more_options(&mut harness);
     harness.run_steps(1);
     harness.render().unwrap().save(dir.join("ui-tray-options.png")).unwrap();
@@ -1440,10 +1516,11 @@ fn render_states() {
     harness.run_steps(2);
     click_at(
         &harness,
-        lane_name(&harness, "127.0.0.1").center(),
+        lane_name(&harness, "Hosted phones").center(),
         PointerButton::Secondary,
     );
     harness.run_steps(2);
+    harness.render().unwrap().save(dir.join("ui-host-menu.png")).unwrap();
     harness.get_by_label("Alerts…").click();
     harness.run_steps(3);
     harness.get_by_label("Limits of its own").click();

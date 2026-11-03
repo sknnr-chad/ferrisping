@@ -322,11 +322,12 @@ fn detail(alert: &Alert) -> String {
     if let Some(detail) = events::limit_detail(&alert.event.kind) {
         return detail;
     }
-    match &alert.event.kind {
-        EventKind::Down => match alert.addr {
-            Some(addr) if addr.to_string() != alert.event.host_name => format!("No replies from {addr}."),
-            _ => "No replies.".to_string(),
-        },
+    let event = &alert.event;
+    match &event.kind {
+        EventKind::Down if event.host_address != event.host_name => {
+            format!("No replies from {}.", event.host_address)
+        }
+        EventKind::Down => "No replies.".to_string(),
         EventKind::Up { outage_secs } => format!("After {} without replies.", format::duration(*outage_secs)),
         EventKind::ResolveFailed(error) => error.clone(),
         EventKind::ExitChanged { .. } => match &alert.networks {
@@ -367,8 +368,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
-
     use ferrisping_core::{Event, HostId};
 
     use super::*;
@@ -382,7 +381,6 @@ mod tests {
                 host_address: "192.0.2.10".to_string(),
                 kind,
             },
-            addr: Some("192.0.2.10".parse::<IpAddr>().unwrap()),
             networks: None,
         }
     }

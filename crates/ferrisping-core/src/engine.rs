@@ -273,7 +273,6 @@ impl State {
         };
         Some(Alert {
             event: event.clone(),
-            addr: host.addr,
             networks,
         })
     }
@@ -1111,6 +1110,29 @@ mod tests {
         assert_eq!(
             *heard.lock().unwrap(),
             [EventKind::Down, EventKind::Up { outage_secs: 3.0 }]
+        );
+    }
+
+    #[test]
+    fn alerts_name_a_renamed_host_by_its_new_name() {
+        let monitor = Monitor::new(ProbeSettings::default());
+        let id = monitor.add_for_test(TargetSpec::new("10.0.0.1"));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&heard);
+        monitor.set_on_alert(move |alert| {
+            let Event {
+                host_name,
+                host_address,
+                ..
+            } = alert.event;
+            sink.lock().unwrap().push((host_name, host_address));
+        });
+        probe_all(&monitor.shared, id, 0.0, [EchoStatus::Reply]);
+        monitor.set_label(id, Some("Office edge".into()));
+        probe_all(&monitor.shared, id, 1.0, [EchoStatus::TimedOut; 3]);
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [("Office edge".to_string(), "10.0.0.1".to_string())]
         );
     }
 

@@ -76,7 +76,7 @@ struct Saved {
     notice_answered: bool,
     /// Which events raise alerts, and how alerts show.
     alerts: AlertChoices,
-    /// Hosts with alerts of their own, by the host as typed.
+    /// Hosts with alerts of their own, by their line in `hosts`, name and all.
     host_alerts: BTreeMap<String, HostChoice>,
     /// ✕ hides the window in the tray, and FerrisPing keeps pinging.
     close_to_tray: bool,

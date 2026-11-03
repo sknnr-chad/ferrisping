@@ -8,8 +8,6 @@
 //! as an event, like an outage, and the hook set with
 //! [`crate::Monitor::set_on_alert`] hears about every alert as it's logged.
 
-use std::net::IpAddr;
-
 use crate::engine::{Event, EventKind};
 use crate::history::{History, Outcome};
 
@@ -81,8 +79,6 @@ impl HostAlerts {
 #[derive(Clone, Debug)]
 pub struct Alert {
     pub event: Event,
-    /// The host's address, once known.
-    pub addr: Option<IpAddr>,
     /// For a switch to another network: what the networks the traffic left
     /// through and now leaves through are called.
     pub networks: Option<(String, String)>,
