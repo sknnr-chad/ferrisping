@@ -1,5 +1,6 @@
-//! The event log: when each host stopped answering and when it came back, and when
-//! its traffic started leaving through another network (ISP).
+//! The event log: when each host stopped answering and when it came back, when its
+//! traffic started leaving through another network (ISP), and when its loss or
+//! round trips crossed the limits set for alerts.
 
 use std::sync::Arc;
 
@@ -45,19 +46,75 @@ pub fn show(ui: &mut Ui, state: &State, clock: &Clock, p: &Palette) {
         });
 }
 
+/// What a crossed limit, or the end of one, means in full: for a row's tooltip and
+/// for notifications.
+pub fn limit_detail(kind: &EventKind) -> Option<String> {
+    Some(match *kind {
+        EventKind::Loss { lost, pings, limit_pct } => format!(
+            "{lost} of the last {pings} pings got no reply. The limit is {}.",
+            format::percent(limit_pct)
+        ),
+        EventKind::LossEnded { limit_pct, pings } => {
+            format!(
+                "Loss has stayed under {} for {pings} pings.",
+                format::percent(limit_pct)
+            )
+        }
+        EventKind::Slow {
+            avg_ms,
+            pings,
+            limit_ms,
+        } => format!(
+            "Replies averaged {} over the last {pings} pings. The limit is {}.",
+            format::ms_unit(avg_ms),
+            format::ms_unit(limit_ms)
+        ),
+        EventKind::SlowEnded { limit_ms, pings } => format!(
+            "Replies have averaged {} or less for {pings} pings.",
+            format::ms_unit(limit_ms)
+        ),
+        _ => return None,
+    })
+}
+
+/// The mark at the start of a row.
+enum Mark {
+    Status(HostStatus),
+    Switch,
+    Limit,
+}
+
 fn event_row(ui: &mut Ui, event: &Event, networks: &Networks, separator: bool, clock: &Clock, p: &Palette) {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::hover());
-    // A host status, or None for the switch mark.
-    let (status, message) = match &event.kind {
-        EventKind::Down => (Some(HostStatus::Down), "Stopped answering".to_string()),
+    let (mark, message) = match &event.kind {
+        EventKind::Down => (Mark::Status(HostStatus::Down), "Stopped answering".to_string()),
         EventKind::Up { outage_secs } => (
-            Some(HostStatus::Up),
+            Mark::Status(HostStatus::Up),
             format!("Answering again after {}", format::duration(*outage_secs)),
         ),
-        EventKind::ResolveFailed(error) => (Some(HostStatus::ResolveFailed), format!("Can't resolve: {error}")),
+        EventKind::ResolveFailed(error) => (
+            Mark::Status(HostStatus::ResolveFailed),
+            format!("Can't resolve: {error}"),
+        ),
         EventKind::ExitChanged { from, to } => (
-            None,
+            Mark::Switch,
             format!("Now leaves via {} (was {})", networks.name(*to), networks.name(*from)),
+        ),
+        EventKind::Loss { lost, pings, .. } => (
+            Mark::Limit,
+            format!("Losing pings: {lost} of the last {pings} got no reply"),
+        ),
+        EventKind::LossEnded { limit_pct, .. } => (
+            Mark::Status(HostStatus::Up),
+            format!("Loss back under {}", format::percent(*limit_pct)),
+        ),
+        EventKind::Slow { avg_ms, pings, .. } => (
+            Mark::Limit,
+            format!("Slow: {} on average over {pings} pings", format::ms_unit(*avg_ms)),
+        ),
+        EventKind::SlowEnded { limit_ms, .. } => (
+            Mark::Status(HostStatus::Up),
+            format!("Round trips back to {} or less", format::ms_unit(*limit_ms)),
         ),
     };
     // The row is painted rather than laid out, so tell screen readers what it says.
@@ -75,6 +132,8 @@ fn event_row(ui: &mut Ui, event: &Event, networks: &Networks, separator: bool, c
             networks.name(from),
             networks.name(to)
         ));
+    } else if let Some(detail) = limit_detail(&event.kind) {
+        response.on_hover_text(detail);
     }
 
     let painter = ui.painter();
@@ -85,9 +144,10 @@ fn event_row(ui: &mut Ui, event: &Event, networks: &Networks, separator: bool, c
     let bottom = rect.top() + 35.0;
     let text_left = rect.left() + 20.0;
     let icon = pos2(rect.left() + 6.0, top);
-    match status {
-        Some(status) => theme::paint_status_icon(painter, icon, 11.0, status, p),
-        None => theme::paint_switch_icon(painter, icon, 11.0, p),
+    match mark {
+        Mark::Status(status) => theme::paint_status_icon(painter, icon, 11.0, status, p),
+        Mark::Switch => theme::paint_switch_icon(painter, icon, 11.0, p),
+        Mark::Limit => theme::paint_limit_icon(painter, icon, 11.0, p),
     }
 
     let time = painter.layout_no_wrap(time, theme::font(12.0), p.text_muted);

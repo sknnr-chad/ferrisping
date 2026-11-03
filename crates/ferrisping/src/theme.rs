@@ -317,6 +317,19 @@ pub fn paint_switch_icon(painter: &Painter, center: Pos2, size: f32, p: &Palette
     }
 }
 
+/// The mark for a host's loss or round trips crossing their limit: a diamond, in
+/// the warning color, unlike any status mark.
+pub fn paint_limit_icon(painter: &Painter, center: Pos2, size: f32, p: &Palette) {
+    let r = size / 2.0;
+    let points = vec![
+        pos2(center.x, center.y - r),
+        pos2(center.x + r * 0.8, center.y),
+        pos2(center.x, center.y + r),
+        pos2(center.x - r * 0.8, center.y),
+    ];
+    painter.add(Shape::convex_polygon(points, p.warning, Stroke::NONE));
+}
+
 /// The shape-coded status mark: a dot for up, a down triangle for down, a warning
 /// triangle for name lookup trouble and a ring while waiting. The shapes differ so
 /// state never depends on telling colors apart.

@@ -10,15 +10,19 @@ use eframe::egui::{
     self, Align, Button, Color32, ComboBox, CornerRadius, Frame, Key, Layout, Margin, RichText, Stroke, TextEdit, Ui,
     vec2,
 };
-use ferrisping_core::{HostStatus, Monitor, ProbeSettings, State, TargetSpec, TraceSettings, now_secs, parse_targets};
+use ferrisping_core::{
+    HostId, HostStatus, Monitor, ProbeSettings, State, TargetSpec, TraceSettings, now_secs, parse_targets,
+};
 use serde::{Deserialize, Serialize};
 
+use crate::alerts::{AlertChoices, AlertsDialog, HostAlertsDialog, HostChoice, Outcome};
 use crate::args::Args;
 use crate::events;
 use crate::format::{self, Clock};
 use crate::lanes::{self, LaneAction, View};
 use crate::route::{self, RouteAction, RouteView};
 use crate::theme::{self, Palette, ThemeChoice};
+use crate::tray::{self, Tray, TrayCommand};
 
 #[cfg(test)]
 mod tests;
@@ -66,6 +70,14 @@ struct Saved {
     network_lookups: bool,
     /// The notice about what FerrisPing sends over the network has been answered.
     notice_answered: bool,
+    /// Which events raise alerts, and how alerts show.
+    alerts: AlertChoices,
+    /// Hosts with alerts of their own, by the host as typed.
+    host_alerts: BTreeMap<String, HostChoice>,
+    /// ✕ hides the window in the tray, and FerrisPing keeps pinging.
+    close_to_tray: bool,
+    /// The banner saying FerrisPing still runs in the tray has been shown.
+    tray_tip_shown: bool,
 }
 
 impl Default for Saved {
@@ -79,6 +91,10 @@ impl Default for Saved {
             network_names: BTreeMap::new(),
             network_lookups: true,
             notice_answered: false,
+            alerts: AlertChoices::default(),
+            host_alerts: BTreeMap::new(),
+            close_to_tray: false,
+            tray_tip_shown: false,
         }
     }
 }
@@ -173,6 +189,17 @@ pub struct FerrisPingApp {
     notice: Option<Notice>,
     /// The notice has been answered, on this run or an earlier one.
     notice_answered: bool,
+    alerts: AlertChoices,
+    alerts_dialog: Option<AlertsDialog>,
+    host_alerts_dialog: Option<HostAlertsDialog>,
+    /// The tray icon, if there is one. Pictures for docs and tests go without.
+    tray: Option<Tray>,
+    close_to_tray: bool,
+    tray_tip_shown: bool,
+    /// Quitting for real, so a close doesn't hide the window in the tray.
+    quitting: bool,
+    /// Hidden in the tray, where only the tooltip shows how hosts are doing.
+    hidden: bool,
     logo: Logo,
     /// Hosts came from the command line: a one-off session that isn't saved.
     session: bool,
@@ -220,6 +247,7 @@ impl FerrisPingApp {
         for (&asn, name) in &saved.network_names {
             monitor.set_network_name(asn, Some(name.clone()));
         }
+        monitor.set_alerts(saved.alerts.settings());
 
         let hosts = if session {
             args.hosts.clone()
@@ -227,6 +255,15 @@ impl FerrisPingApp {
             saved.hosts.iter().flat_map(|h| parse_targets(h)).collect()
         };
         add_hosts(&monitor, hosts);
+        let own: Vec<(HostId, HostChoice)> = monitor
+            .read()
+            .hosts
+            .iter()
+            .filter_map(|h| saved.host_alerts.get(&h.spec.to_input()).map(|&choice| (h.id, choice)))
+            .collect();
+        for (id, choice) in own {
+            monitor.set_host_alerts(id, choice.alerts());
+        }
 
         Self {
             monitor,
@@ -245,6 +282,14 @@ impl FerrisPingApp {
             rename: None,
             notice,
             notice_answered: saved.notice_answered,
+            alerts: saved.alerts,
+            alerts_dialog: None,
+            host_alerts_dialog: None,
+            tray: None,
+            close_to_tray: saved.close_to_tray,
+            tray_tip_shown: saved.tray_tip_shown,
+            quitting: false,
+            hidden: false,
             logo: Logo::load(&cc.egui_ctx),
             session,
             screenshot: args.screenshot.map(|path| Screenshot {
@@ -254,6 +299,65 @@ impl FerrisPingApp {
                 requested: false,
             }),
         }
+    }
+
+    /// Show alerts from the tray icon, and take its clicks.
+    pub fn attach_tray(&mut self, tray: Tray) {
+        tray.set_options(self.alerts.notifications, self.alerts.sound);
+        self.monitor.set_on_alert(tray.notifier());
+        self.tray = Some(tray);
+    }
+
+    /// Bring the window back from the tray or the taskbar, in front.
+    fn open_window(&mut self, ctx: &egui::Context) {
+        self.hidden = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Do what the tray asked, and keep it up to date: its tooltip, its menu, and
+    /// whether alerts show.
+    fn tray_logic(&mut self, ctx: &egui::Context) {
+        let Some(commands) = self.tray.as_ref().map(Tray::commands) else {
+            return;
+        };
+        for command in commands {
+            match command {
+                TrayCommand::Open => self.open_window(ctx),
+                TrayCommand::OpenEvents => {
+                    self.show_events = true;
+                    self.open_window(ctx);
+                }
+                TrayCommand::TogglePause => self.monitor.update_settings(|s| s.paused = !s.paused),
+                TrayCommand::ToggleNotifications => self.alerts.notifications = !self.alerts.notifications,
+                TrayCommand::Quit => self.quit(ctx),
+            }
+        }
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        tray.set_options(self.alerts.notifications, self.alerts.sound);
+        // ✕, or Alt+F4: hide in the tray rather than quit, if that's what's wanted.
+        if self.close_to_tray && !self.quitting && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.hidden = true;
+            if !self.tray_tip_shown {
+                tray.note(tray::still_running());
+                self.tray_tip_shown = true;
+            }
+        }
+        let state = self.monitor.read();
+        let tip = tray::tooltip(&state);
+        let paused = state.settings.paused;
+        drop(state);
+        tray.set_status(&tip, paused);
     }
 
     fn toolbar(&mut self, ui: &mut Ui, p: &Palette, settings: &ProbeSettings, actions: &mut Vec<Action>) {
@@ -358,9 +462,33 @@ impl FerrisPingApp {
                 ui.close();
             }
             ui.separator();
+            if ui
+                .button("Alerts…")
+                .on_hover_text("What shows a Windows notification, and limits on loss and round trips")
+                .clicked()
+            {
+                self.alerts_dialog = Some(AlertsDialog::new(self.alerts));
+                ui.close();
+            }
+            if self.tray.is_some() {
+                ui.checkbox(&mut self.close_to_tray, "Keep running in the tray when closed")
+                    .on_hover_text(
+                        "✕ hides the window and FerrisPing keeps pinging. Click its icon by the clock to open \
+                         it again.",
+                    );
+            }
+            ui.separator();
             if ui.button("Clear graphs and events").clicked() {
                 actions.push(Action::ClearData);
                 ui.close();
+            }
+            if self.tray.is_some() && self.close_to_tray {
+                ui.separator();
+                if ui.button("Quit FerrisPing").clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.quit(&ctx);
+                    ui.close();
+                }
             }
         })
         .response
@@ -495,6 +623,12 @@ impl FerrisPingApp {
                     }
                 }
                 Action::Route(RouteAction::Watch(addr)) => add_hosts(&self.monitor, parse_targets(&addr)),
+                Action::Lane(LaneAction::Alerts(id)) => {
+                    let state = self.monitor.read();
+                    if let Some(host) = state.hosts.iter().find(|h| h.id == id) {
+                        self.host_alerts_dialog = Some(HostAlertsDialog::new(host, &self.alerts.limits));
+                    }
+                }
                 Action::Lane(LaneAction::RenameNetwork(asn)) | Action::Route(RouteAction::RenameNetwork(asn)) => {
                     let state = self.monitor.read();
                     let networks = &state.networks;
@@ -655,6 +789,28 @@ impl FerrisPingApp {
         }
     }
 
+    /// The Alerts dialogs, for every host and for one, while they're open.
+    fn alerts_dialogs(&mut self, ctx: &egui::Context, p: &Palette, settings: &ProbeSettings) {
+        if let Some(dialog) = &mut self.alerts_dialog
+            && let Some(outcome) = dialog.show(ctx, p, settings.interval, settings.network_lookups)
+        {
+            if let Outcome::Saved(choices) = outcome {
+                // The tray hears about notifications and sound on the next frame.
+                self.alerts = choices;
+                self.monitor.set_alerts(choices.settings());
+            }
+            self.alerts_dialog = None;
+        }
+        if let Some(dialog) = &mut self.host_alerts_dialog
+            && let Some(outcome) = dialog.show(ctx, p, settings.interval, &self.alerts)
+        {
+            if let Outcome::Saved(alerts) = outcome {
+                self.monitor.set_host_alerts(dialog.host, alerts);
+            }
+            self.host_alerts_dialog = None;
+        }
+    }
+
     fn take_screenshot_when_due(&mut self, ctx: &egui::Context) {
         let Some(shot) = &mut self.screenshot else {
             return;
@@ -690,6 +846,12 @@ impl FerrisPingApp {
 }
 
 impl eframe::App for FerrisPingApp {
+    // Runs while the window is hidden in the tray too, whenever new samples or a
+    // click on the tray icon ask for a repaint.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.tray_logic(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let p = theme::palette(ui.visuals().dark_mode);
         let now = now_secs();
@@ -786,10 +948,15 @@ impl eframe::App for FerrisPingApp {
         let ctx = ui.ctx().clone();
         self.rename_dialog(&ctx, p);
         self.notice_dialog(&ctx, p);
+        self.alerts_dialogs(&ctx, p, &settings);
         self.apply(&ctx, actions);
-        let redraw = redraw_interval(self.window_secs);
+        let redraw = if self.hidden {
+            HIDDEN_REDRAW
+        } else {
+            redraw_interval(self.window_secs)
+        };
         self.redraw_ms.store(redraw.as_millis() as u64, Ordering::Relaxed);
-        if self.live && !settings.paused {
+        if self.live && !settings.paused && !self.hidden {
             // Keep the graphs sliding toward the newest samples.
             ctx.request_repaint_after(redraw);
         }
@@ -826,9 +993,22 @@ impl eframe::App for FerrisPingApp {
                 _ => settings.network_lookups,
             },
             notice_answered: self.notice_answered,
+            alerts: self.alerts,
+            host_alerts: state
+                .hosts
+                .iter()
+                .filter_map(|h| HostChoice::of(h.alerts, &self.alerts.limits).map(|choice| (h.spec.to_input(), choice)))
+                .collect(),
+            close_to_tray: self.close_to_tray,
+            tray_tip_shown: self.tray_tip_shown,
         };
         drop(state);
         eframe::set_value(storage, STORAGE_KEY, &saved);
+    }
+
+    fn on_exit(&mut self) {
+        // Take the icon away now, rather than leave it for Windows to notice.
+        self.tray = None;
     }
 }
 
@@ -853,6 +1033,10 @@ fn redraw_interval(window_secs: u64) -> Duration {
     Duration::from_secs_f64((window_secs as f64 / 1000.0).clamp(0.1, 1.0))
 }
 
+/// How often to redraw while hidden in the tray, for its tooltip. egui on Windows can't
+/// tell a hidden window from a shown one, so it would go on drawing graphs nobody sees.
+const HIDDEN_REDRAW: Duration = Duration::from_secs(1);
+
 /// `6 hosts · 5 up · 1 down · every 1 s · 2 s timeout`
 fn summary(state: &State, settings: &ProbeSettings) -> String {
     let count = |status| state.hosts.iter().filter(|h| h.status == status).count();
@@ -874,7 +1058,7 @@ fn summary(state: &State, settings: &ProbeSettings) -> String {
     parts.join("  ·  ")
 }
 
-fn accent_button<'a>(p: &Palette, label: &str) -> Button<'a> {
+pub fn accent_button<'a>(p: &Palette, label: &str) -> Button<'a> {
     Button::new(RichText::new(label).color(p.on_accent))
         .fill(p.accent)
         .stroke(Stroke::NONE)

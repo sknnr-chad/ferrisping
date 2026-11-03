@@ -3,6 +3,7 @@
 // Release builds are GUI-only; debug builds keep a console for panics and logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod alerts;
 mod app;
 mod args;
 mod events;
@@ -11,6 +12,7 @@ mod lanes;
 mod route;
 mod series;
 mod theme;
+mod tray;
 mod window;
 
 use eframe::egui;
@@ -19,6 +21,15 @@ use eframe::wgpu;
 
 fn main() -> eframe::Result {
     let args = args::Args::parse(std::env::args().skip(1));
+    // FerrisPing started normally watches the saved hosts, and one copy is enough:
+    // starting it again opens the window of the one that's running, maybe from the
+    // tray. Sessions of hosts from the command line run on their own.
+    let main_copy = args.hosts.is_empty() && args.screenshot.is_none();
+    if main_copy && !tray::first_copy() {
+        return Ok(());
+    }
+    // Pictures for docs go without a tray icon.
+    let with_tray = args.screenshot.is_none();
     let (size, corner) = window::first_window(window::work_area());
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("FerrisPing")
@@ -53,6 +64,12 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "FerrisPing",
         options,
-        Box::new(|cc| Ok(Box::new(app::FerrisPingApp::new(cc, args)))),
+        Box::new(move |cc| {
+            let mut app = app::FerrisPingApp::new(cc, args);
+            if with_tray && let Some(tray) = tray::Tray::start(&cc.egui_ctx, main_copy) {
+                app.attach_tray(tray);
+            }
+            Ok(Box::new(app))
+        }),
     )
 }

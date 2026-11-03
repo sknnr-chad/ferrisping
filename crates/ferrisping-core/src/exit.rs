@@ -312,7 +312,7 @@ fn update(shared: &Shared, id: HostId, tracker: &mut Tracker, seen: Seen, now: f
                 to: change.to,
             },
         };
-        state.push_event(event);
+        shared.log(state, event);
     }
     drop(guard);
     shared.notify();

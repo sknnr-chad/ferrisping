@@ -1,8 +1,9 @@
-//! FerrisPing's engine: ICMP probing, scheduling, per-host history, traceroute and
-//! the networks (ISPs) along the way.
+//! FerrisPing's engine: ICMP probing, scheduling, per-host history, traceroute, the
+//! networks (ISPs) along the way, and alerts.
 //!
 //! The GUI reads everything through [`Monitor`]; nothing here depends on the UI toolkit.
 
+mod alerts;
 mod engine;
 mod exit;
 mod history;
@@ -14,6 +15,7 @@ mod trace;
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+pub use alerts::{Alert, AlertSettings, HostAlerts, Limits};
 pub use engine::{Event, EventKind, Host, HostId, HostStatus, Monitor, ProbeSettings, State, StateGuard};
 pub use exit::{CHECK_EVERY as EXIT_CHECK_EVERY, Exit, ExitChange};
 pub use history::{History, Outcome, Sample, WindowStats};

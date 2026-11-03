@@ -56,6 +56,8 @@ pub enum LaneAction {
     TraceRoute(HostId),
     /// Give a network (by AS number) a name of the user's choosing.
     RenameNetwork(u32),
+    /// Open the host's Alerts dialog.
+    Alerts(HostId),
 }
 
 /// A switch to another way out, ready to draw on a graph.
@@ -653,6 +655,14 @@ fn lane_menu(response: &Response, host: &Host, networks: &Networks, index: usize
                 .clicked()
         {
             out.actions.push(LaneAction::RenameNetwork(exit.asn));
+            ui.close();
+        }
+        if ui
+            .button("Alerts…")
+            .on_hover_text("Which of this host's events show a notification, and limits of its own")
+            .clicked()
+        {
+            out.actions.push(LaneAction::Alerts(host.id));
             ui.close();
         }
         ui.separator();

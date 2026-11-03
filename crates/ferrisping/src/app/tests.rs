@@ -4,23 +4,28 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use eframe::App as _;
 use eframe::egui::accesskit::{Role, Toggled};
-use eframe::egui::{self, Modifiers, PointerButton, Pos2, Rect, Vec2, pos2, vec2};
+use eframe::egui::{
+    self, Modifiers, PointerButton, Pos2, Rect, Vec2, ViewportCommand, ViewportEvent, ViewportId, pos2, vec2,
+};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use ferrisping_core::{
-    EchoStatus, Event, EventKind, Exit, ExitChange, Host, HostStatus, Outcome, RECENT_RESULTS, TargetSpec, now_secs,
-    parse_targets,
+    AlertSettings, EchoStatus, Event, EventKind, Exit, ExitChange, Host, HostAlerts, HostStatus, Limits, Outcome,
+    RECENT_RESULTS, TargetSpec, now_secs, parse_targets,
 };
 
-use super::{FerrisPingApp, LOOKUPS_LABEL, PRIVACY_URL, STORAGE_KEY, Saved};
+use super::{FerrisPingApp, LOOKUPS_LABEL, PRIVACY_URL, STORAGE_KEY, Saved, redraw_interval};
+use crate::alerts::HostChoice;
 use crate::args::Args;
 use crate::lanes;
 use crate::route::RouteView;
 use crate::theme::ThemeChoice;
+use crate::tray::{self, Tray, TrayCommand};
 use crate::window;
 
 fn app<'a>(hosts: &str) -> Harness<'a, FerrisPingApp> {
@@ -927,6 +932,263 @@ fn the_notice_can_be_read_again_from_the_menu() {
     assert!(!lookups_on(&harness));
 }
 
+/// What a run after the first saved, with these hosts.
+fn saved_hosts(hosts: &[&str]) -> Saved {
+    Saved {
+        hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        ..answered()
+    }
+}
+
+/// The app as `saved` left it, with a tray icon that's never shown: the test
+/// plays the tray.
+fn app_with_tray<'a>(saved: Saved) -> Harness<'a, FerrisPingApp> {
+    let mut harness = app_saved(Args::default(), window::SIZE, saved);
+    let tray = Tray::detached(&harness.ctx);
+    harness.state_mut().attach_tray(tray);
+    harness.run_steps(2);
+    harness
+}
+
+fn tray_of<'h>(harness: &'h Harness<'_, FerrisPingApp>) -> &'h Tray {
+    harness.state().tray.as_ref().expect("the app has a tray")
+}
+
+/// What the app asked of its window in the last frame.
+fn window_commands(harness: &Harness<'_, FerrisPingApp>) -> Vec<ViewportCommand> {
+    harness
+        .output()
+        .viewport_output
+        .get(&ViewportId::ROOT)
+        .map(|output| output.commands.clone())
+        .unwrap_or_default()
+}
+
+/// How often the app last asked to be redrawn when hosts change.
+fn redraw_ms(harness: &Harness<'_, FerrisPingApp>) -> u64 {
+    harness.state().redraw_ms.load(Ordering::Relaxed)
+}
+
+/// Click the window's ✕, and run the frame that hears about it.
+fn close_window(harness: &mut Harness<'_, FerrisPingApp>) {
+    harness
+        .input_mut()
+        .viewports
+        .get_mut(&ViewportId::ROOT)
+        .expect("the window")
+        .events
+        .push(ViewportEvent::Close);
+    harness.step();
+}
+
+fn saved_by(harness: &mut Harness<'_, FerrisPingApp>) -> Saved {
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    eframe::get_value(&storage, STORAGE_KEY).expect("settings were saved")
+}
+
+#[test]
+fn closing_to_the_tray_hides_the_window_until_the_tray_opens_it() {
+    let mut harness = app_with_tray(saved_hosts(&["127.0.0.1"]));
+    // Off at first: ✕ quits, as it always has.
+    close_window(&mut harness);
+    assert!(!window_commands(&harness).contains(&ViewportCommand::CancelClose));
+    open_more_options(&mut harness);
+    assert!(
+        harness.query_by_label("Quit FerrisPing").is_none(),
+        "✕ quits, so there's no need"
+    );
+    harness.get_by_label("Keep running in the tray when closed").click();
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+
+    close_window(&mut harness);
+    let commands = window_commands(&harness);
+    assert!(
+        commands.contains(&ViewportCommand::CancelClose) && commands.contains(&ViewportCommand::Visible(false)),
+        "{commands:?}"
+    );
+    assert_eq!(
+        tray_of(&harness).take_note_for_test(),
+        Some(tray::still_running()),
+        "the first time, a banner says it's still running"
+    );
+    assert_eq!(
+        redraw_ms(&harness),
+        1000,
+        "hidden, it redraws once a second, for the tooltip"
+    );
+    tray_of(&harness).send_for_test(TrayCommand::Open);
+    harness.step();
+    let commands = window_commands(&harness);
+    assert!(
+        commands.contains(&ViewportCommand::Visible(true)) && commands.contains(&ViewportCommand::Focus),
+        "{commands:?}"
+    );
+    let shown = redraw_interval(harness.state().window_secs).as_millis() as u64;
+    assert_eq!(redraw_ms(&harness), shown, "shown again, the graphs slide as before");
+    close_window(&mut harness);
+    assert!(window_commands(&harness).contains(&ViewportCommand::Visible(false)));
+    assert_eq!(tray_of(&harness).take_note_for_test(), None, "the banner comes once");
+
+    // Quitting from the tray quits, without hiding again.
+    tray_of(&harness).send_for_test(TrayCommand::Quit);
+    harness.step();
+    assert!(window_commands(&harness).contains(&ViewportCommand::Close));
+    close_window(&mut harness);
+    assert!(!window_commands(&harness).contains(&ViewportCommand::CancelClose));
+    let saved = saved_by(&mut harness);
+    assert!(saved.close_to_tray && saved.tray_tip_shown);
+}
+
+#[test]
+fn quit_in_the_menu_quits_while_closing_hides() {
+    let mut harness = app_with_tray(Saved {
+        close_to_tray: true,
+        ..saved_hosts(&["127.0.0.1"])
+    });
+    open_more_options(&mut harness);
+    harness.get_by_label("Quit FerrisPing").click();
+    harness.run_steps(1);
+    assert!(window_commands(&harness).contains(&ViewportCommand::Close));
+    close_window(&mut harness);
+    assert!(!window_commands(&harness).contains(&ViewportCommand::CancelClose));
+}
+
+#[test]
+fn the_tray_menu_pauses_and_turns_notifications_off() {
+    let mut harness = app_with_tray(saved_hosts(&["127.0.0.1"]));
+    assert_eq!(tray_of(&harness).tip_for_test(), "FerrisPing · 1 host");
+    tray_of(&harness).send_for_test(TrayCommand::TogglePause);
+    harness.step();
+    assert!(harness.state().monitor.settings().paused);
+    assert_eq!(tray_of(&harness).tip_for_test(), "FerrisPing · 1 host · paused");
+    tray_of(&harness).send_for_test(TrayCommand::ToggleNotifications);
+    harness.step();
+    assert!(!saved_by(&mut harness).alerts.notifications);
+    // A click on a banner opens the window with the events showing.
+    harness.state_mut().show_events = false;
+    tray_of(&harness).send_for_test(TrayCommand::OpenEvents);
+    harness.step();
+    assert!(harness.state().show_events);
+    assert!(window_commands(&harness).contains(&ViewportCommand::Visible(true)));
+}
+
+#[test]
+fn the_alerts_dialog_sets_alerts_for_every_host() {
+    let mut harness = app_saved(Args::default(), window::SIZE, saved_hosts(&["127.0.0.1"]));
+    let alerts = |h: &Harness<'_, FerrisPingApp>| h.state().monitor.read().alerts;
+    assert_eq!(alerts(&harness), AlertSettings::default());
+    let open = |harness: &mut Harness<'_, FerrisPingApp>| {
+        open_more_options(harness);
+        harness.get_by_label("Alerts…").click();
+        harness.run_steps(2);
+    };
+
+    // Cancel leaves them as they were.
+    open(&mut harness);
+    harness.get_by_label("Loss reaches").click();
+    harness.run_steps(1);
+    harness.get_by_label("Cancel").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Loss reaches").is_none(), "the dialog closes");
+    assert_eq!(alerts(&harness), AlertSettings::default());
+
+    open(&mut harness);
+    harness.get_by_label("Loss reaches").click();
+    harness.run_steps(1);
+    harness
+        .get_by_label("A host stops answering, and when it answers again")
+        .click();
+    harness.run_steps(1);
+    harness.get_by_label("Save").click();
+    harness.run_steps(2);
+    assert_eq!(
+        alerts(&harness),
+        AlertSettings {
+            outages: false,
+            switches: true,
+            limits: Limits {
+                pings: 30,
+                loss_pct: Some(10.0),
+                slow_ms: None,
+            },
+        }
+    );
+    let saved = saved_by(&mut harness);
+    assert!(saved.alerts.limits.loss && !saved.alerts.outages);
+}
+
+#[test]
+fn a_host_can_have_alerts_of_its_own() {
+    let mut harness = app_saved(Args::default(), window::SIZE, saved_hosts(&["127.0.0.1", "127.0.0.2"]));
+    click_at(
+        &harness,
+        lane_name(&harness, "127.0.0.1").center(),
+        PointerButton::Secondary,
+    );
+    harness.run_steps(2);
+    harness.get_by_label("Alerts…").click();
+    harness.run_steps(4);
+    harness.get_by_label("Alerts for 127.0.0.1");
+    harness.get_by_label("None for this host").click();
+    harness.run_steps(1);
+    harness.get_by_label("Save").click();
+    harness.run_steps(2);
+    let alerts_of = |h: &Harness<'_, FerrisPingApp>, name: &str| {
+        let state = h.state().monitor.read();
+        state
+            .hosts
+            .iter()
+            .find(|host| host.spec.host == name)
+            .map(|host| host.alerts)
+    };
+    assert_eq!(alerts_of(&harness, "127.0.0.1"), Some(HostAlerts::Off));
+    assert_eq!(alerts_of(&harness, "127.0.0.2"), Some(HostAlerts::Usual));
+
+    let mut storage = MemoryStorage::default();
+    harness.state_mut().save(&mut storage);
+    let saved: Saved = eframe::get_value(&storage, STORAGE_KEY).expect("settings were saved");
+    assert_eq!(
+        saved.host_alerts,
+        BTreeMap::from([("127.0.0.1".to_string(), HostChoice::Off)])
+    );
+    drop(harness);
+    // The next start gives it the same alerts.
+    let mut harness = Harness::builder().with_size(window::SIZE).build_eframe(|cc| {
+        cc.storage = Some(&storage);
+        FerrisPingApp::new(cc, Args::default())
+    });
+    harness.run_steps(2);
+    assert_eq!(alerts_of(&harness, "127.0.0.1"), Some(HostAlerts::Off));
+}
+
+#[test]
+fn crossed_limits_are_logged_in_events() {
+    let mut harness = app("127.0.0.1");
+    harness.state().monitor.edit_for_test(|state| {
+        let host = &state.hosts[0];
+        let event = Event {
+            at: now_secs(),
+            host: host.id,
+            host_name: host.name().to_string(),
+            kind: EventKind::Loss {
+                lost: 4,
+                pings: 30,
+                limit_pct: 10.0,
+            },
+        };
+        state.events.push(event);
+    });
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains("Losing pings: 4 of the last 30 got no reply")
+            .is_some()
+    );
+}
+
 /// Renders a few states to PNG files for a visual check:
 /// `FERRISPING_RENDER_DIR=<dir> cargo test -p ferrisping -- --ignored render_states`
 #[test]
@@ -975,6 +1237,30 @@ fn render_states() {
     let mut harness = first_run();
     harness.run_steps(2);
     harness.render().unwrap().save(dir.join("ui-notice.png")).unwrap();
+
+    // The menu with a tray icon, and the Alerts dialogs.
+    let mut harness = app_with_tray(saved_hosts(&["127.0.0.1"]));
+    open_more_options(&mut harness);
+    harness.run_steps(1);
+    harness.render().unwrap().save(dir.join("ui-tray-options.png")).unwrap();
+    harness.get_by_label("Alerts…").click();
+    harness.run_steps(3);
+    harness.get_by_label("Loss reaches").click();
+    harness.run_steps(2);
+    harness.render().unwrap().save(dir.join("ui-alerts.png")).unwrap();
+    harness.get_by_label("Cancel").click();
+    harness.run_steps(2);
+    click_at(
+        &harness,
+        lane_name(&harness, "127.0.0.1").center(),
+        PointerButton::Secondary,
+    );
+    harness.run_steps(2);
+    harness.get_by_label("Alerts…").click();
+    harness.run_steps(3);
+    harness.get_by_label("Limits of its own").click();
+    harness.run_steps(2);
+    harness.render().unwrap().save(dir.join("ui-host-alerts.png")).unwrap();
 
     // The shortest lanes that keep their numbers, and a dozen compact ones in the
     // first window on a 1280 × 800-point laptop screen.
