@@ -21,6 +21,13 @@ FerrisPing is new (version 0.2). It runs on Windows 10 and 11; macOS and Linux a
   **Rename…**, which keeps its graph. Its address shows beside the name, in the lane and in the events list.
 - **Outages logged**: a host that misses 3 replies in a row is marked down. The events list notes when it went
   down, when it came back and how long it was out.
+- **Alerts as Windows notifications**: when a host stops answering and answers again, when its traffic switches
+  to another network, and when its loss or round trips over its last pings cross limits you set, for every host
+  or for one. Alerts that come together share a notification, which can play Windows' sound or not. They come
+  from FerrisPing's tray icon, so there's nothing to register, and nothing goes over the network.
+- **A tray icon**: its tooltip says how many hosts are down, and its menu pauses pinging or quits. With **Keep
+  running in the tray when closed** on (under More options), ✕ hides the window and FerrisPing keeps pinging;
+  click the icon to bring the window back.
 - **Continuous traceroute**: every hop on the way to a host, measured again and again (like mtr or pathping), so
   loss and delay can be pinned on one hop.
 - **The network your traffic leaves through**: each lane names the first public network on its route
@@ -39,8 +46,12 @@ FerrisPing is new (version 0.2). It runs on Windows 10 and 11; macOS and Linux a
 ## Install
 
 Download `ferrisping.exe` from [Releases](../../releases) and run it. It keeps your hosts, interval, time window,
-theme and network names in `%APPDATA%\FerrisPing`. Graphs and events are kept in memory only, so they start fresh
-each time. To uninstall FerrisPing, delete `ferrisping.exe` and that folder.
+theme, network names and alerts in `%APPDATA%\FerrisPing`. Graphs and events are kept in memory only, so they
+start fresh each time. To uninstall FerrisPing, delete `ferrisping.exe` and that folder.
+
+Like any program with a tray icon, FerrisPing then shows up in Windows' own lists of tray icons (Settings ›
+Personalization › Taskbar) and of programs that send notifications (Settings › System › Notifications, where you
+can turn its notifications off). Windows keeps those lists itself; FerrisPing doesn't write to the registry.
 
 The exe isn't code-signed yet, so Windows SmartScreen may warn about it the first time: choose **More info**, then
 **Run anyway**.
@@ -109,7 +120,8 @@ ferrisping [hosts...] [--interval 0.5] [--window 15m] [--theme dark|light|system
 ```
 
 Hosts given on the command line start a one-off session that isn't saved. `--route <host>` also opens that host's
-route.
+route. A session runs on its own, while starting FerrisPing again without hosts opens the copy that's already
+running, even from the tray.
 
 ## Building from source
 
@@ -151,8 +163,8 @@ cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
 ## Roadmap
 
 Windows comes first, and macOS and Linux are next. The pinging and DNS code is the Windows-only part, so on other
-systems FerrisPing doesn't work yet. After that: alerts (tray, sound, email), saved host groups and TCP port
-checks. There are no dates.
+systems FerrisPing doesn't work yet. After that: email alerts, saved host groups and TCP port checks. There are
+no dates.
 
 ## Contributing
 

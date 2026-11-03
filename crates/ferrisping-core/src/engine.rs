@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::alerts::{Alert, AlertSettings, HostAlerts, Watch};
 use crate::exit::{self, Exit, ExitChange};
 use crate::history::{History, Outcome, Sample};
 use crate::icmp::{self, EchoReply};
@@ -100,6 +101,13 @@ pub struct Host {
     pub exit: Option<Exit>,
     /// Switches to another way out, oldest first.
     pub exit_changes: Vec<ExitChange>,
+    /// Alerts of its own, if it has them.
+    pub alerts: HostAlerts,
+    /// Where it stands with the loss and round-trip limits.
+    watch: Watch,
+    /// It was up when its latest outage began. Only then is the outage an alert: a host
+    /// that never answered, like an unused address in a subnet, didn't stop answering.
+    was_up: bool,
     loss_streak: u32,
     loss_streak_start: f64,
     /// Next sample to feed into the up/down logic. Probes can finish out of
@@ -120,6 +128,9 @@ impl Host {
             version: 0,
             exit: None,
             exit_changes: Vec::new(),
+            alerts: HostAlerts::default(),
+            watch: Watch::default(),
+            was_up: false,
             loss_streak: 0,
             loss_streak_start: now,
             next_to_process: 0,
@@ -157,6 +168,7 @@ impl Host {
                 }
                 self.loss_streak += 1;
                 if self.status != HostStatus::Down && self.loss_streak >= down_after.max(1) {
+                    self.was_up = self.status == HostStatus::Up;
                     self.status = HostStatus::Down;
                     self.status_since = self.loss_streak_start;
                     return Some(EventKind::Down);
@@ -182,6 +194,28 @@ pub enum EventKind {
         from: u32,
         to: u32,
     },
+    /// At least the loss limit of the last pings got no reply (see [`crate::Limits`]).
+    Loss {
+        lost: u32,
+        pings: u32,
+        limit_pct: f32,
+    },
+    /// The loss has stayed within its limit for as many pings as it's judged over.
+    LossEnded {
+        limit_pct: f32,
+        pings: u32,
+    },
+    /// The replies to the last pings averaged more than the limit.
+    Slow {
+        avg_ms: f32,
+        pings: u32,
+        limit_ms: f32,
+    },
+    /// Round trips have stayed within their limit for as many pings as they're judged over.
+    SlowEnded {
+        limit_ms: f32,
+        pings: u32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -206,6 +240,8 @@ pub struct State {
     pub networks: Networks,
     /// When a probe was last skipped because too many were out at once.
     pub probes_skipped_at: Option<f64>,
+    /// Which events are alerts, for hosts without alerts of their own.
+    pub alerts: AlertSettings,
 }
 
 impl State {
@@ -215,6 +251,30 @@ impl State {
 
     fn host_mut(&mut self, id: HostId) -> Option<&mut Host> {
         self.hosts.iter_mut().find(|h| h.id == id)
+    }
+
+    /// The alert `event` makes, if it's one for its host.
+    fn alert_for(&self, event: &Event) -> Option<Alert> {
+        let host = self.host(event.host)?;
+        if host.alerts == HostAlerts::Off {
+            return None;
+        }
+        let networks = match event.kind {
+            EventKind::Down | EventKind::Up { .. } if self.alerts.outages && host.was_up => None,
+            EventKind::ExitChanged { from, to } if self.alerts.switches => {
+                Some((self.networks.name(from), self.networks.name(to)))
+            }
+            // Only logged while the host has limits for them.
+            EventKind::Loss { .. }
+            | EventKind::LossEnded { .. }
+            | EventKind::Slow { .. }
+            | EventKind::SlowEnded { .. } => None,
+            _ => return None,
+        };
+        Some(Alert {
+            event: event.clone(),
+            networks,
+        })
     }
 
     pub(crate) fn push_event(&mut self, event: Event) {
@@ -258,11 +318,13 @@ impl Drop for StateGuard<'_> {
 }
 
 type ChangeFn = Box<dyn Fn() + Send + Sync>;
+type AlertFn = Box<dyn Fn(Alert) + Send + Sync>;
 
 pub(crate) struct Shared {
     state: RwLock<State>,
     pub(crate) settings_tx: watch::Sender<ProbeSettings>,
     on_change: RwLock<Option<ChangeFn>>,
+    on_alert: RwLock<Option<AlertFn>>,
     /// Time our own timer adds on top of the network round trip (f64 bits, ms).
     overhead_ms: AtomicU64,
     /// Taken by each host's check of its way out, so those run one at a time.
@@ -293,9 +355,11 @@ impl Shared {
                 settings,
                 networks: Networks::default(),
                 probes_skipped_at: None,
+                alerts: AlertSettings::default(),
             }),
             settings_tx: watch::Sender::new(settings),
             on_change: RwLock::new(None),
+            on_alert: RwLock::new(None),
             overhead_ms: AtomicU64::new(DEFAULT_OVERHEAD_MS.to_bits()),
             exit_turn: tokio::sync::Mutex::new(()),
             probes_out: AtomicUsize::new(0),
@@ -348,6 +412,17 @@ impl Shared {
         }
     }
 
+    /// Log an event, and hand it to the alert hook if it's an alert for its host.
+    /// The caller holds the write lock, which the hook knows not to take.
+    pub(crate) fn log(&self, state: &mut State, event: Event) {
+        if let Some(on_alert) = self.on_alert.read().unwrap_or_else(PoisonError::into_inner).as_ref()
+            && let Some(alert) = state.alert_for(&event)
+        {
+            on_alert(alert);
+        }
+        state.push_event(event);
+    }
+
     fn resolved(&self, id: HostId, addr: IpAddr) -> bool {
         let mut state = self.write();
         let Some(host) = state.host_mut(id) else {
@@ -377,13 +452,14 @@ impl Shared {
             host.status_since = now;
             let host_name = host.name().to_string();
             let host_address = host.address();
-            state.push_event(Event {
+            let event = Event {
                 at: now,
                 host: id,
                 host_name,
                 host_address,
                 kind: EventKind::ResolveFailed(error),
-            });
+            };
+            self.log(&mut state, event);
         }
         drop(state);
         self.notify();
@@ -404,6 +480,7 @@ impl Shared {
     fn finish_probe(&self, id: HostId, seq: u64, reply: EchoReply, down_after: u32) {
         let mut guard = self.write();
         let state = &mut *guard;
+        let usual = state.alerts.limits;
         let Some(host) = state.hosts.iter_mut().find(|h| h.id == id) else {
             return;
         };
@@ -419,14 +496,35 @@ impl Shared {
         }
         host.version += 1;
 
+        let limits = host.alerts.limits(usual);
         let mut events = Vec::new();
         host.next_to_process = host.next_to_process.max(host.history.first_seq());
         while let Some(sample) = host.history.get(host.next_to_process).copied() {
             if sample.outcome == Outcome::Pending {
                 break;
             }
+            let done = host.next_to_process;
             host.next_to_process += 1;
+            let mut kinds = Vec::new();
             if let Some(kind) = host.observe(&sample, down_after) {
+                match kind {
+                    // The outage is the alert now. Once it's over, its lost pings don't
+                    // count toward the loss.
+                    EventKind::Down => host.watch.reset(),
+                    EventKind::Up { .. } => host.watch.restart(done),
+                    _ => {}
+                }
+                kinds.push(kind);
+            }
+            // Loss is judged at replies, so a host that stops answering raises the
+            // outage alert rather than a loss alert just before it.
+            if host.status == HostStatus::Up
+                && !sample.is_lost()
+                && let Some(limits) = limits
+            {
+                kinds.extend(host.watch.judge(&host.history, done, limits));
+            }
+            for kind in kinds {
                 let at = match kind {
                     EventKind::Down => host.status_since,
                     _ => sample.t,
@@ -441,7 +539,7 @@ impl Shared {
             }
         }
         for event in events {
-            state.push_event(event);
+            self.log(state, event);
         }
         drop(guard);
         self.notify();
@@ -520,6 +618,41 @@ impl Monitor {
     /// Called from engine threads whenever something changes (e.g. to request a repaint).
     pub fn set_on_change(&self, on_change: impl Fn() + Send + Sync + 'static) {
         *self.shared.on_change.write().unwrap_or_else(PoisonError::into_inner) = Some(Box::new(on_change));
+    }
+
+    /// Called from engine threads with each alert as it's logged. The state is
+    /// locked for writing meanwhile, so hand the alert on and don't lock it again.
+    pub fn set_on_alert(&self, on_alert: impl Fn(Alert) + Send + Sync + 'static) {
+        *self.shared.on_alert.write().unwrap_or_else(PoisonError::into_inner) = Some(Box::new(on_alert));
+    }
+
+    /// Which events are alerts, for hosts without alerts of their own. New limits
+    /// are judged afresh.
+    pub fn set_alerts(&self, alerts: AlertSettings) {
+        let mut state = self.shared.write();
+        let limits_changed = state.alerts.limits != alerts.limits;
+        state.alerts = alerts;
+        if limits_changed {
+            for host in state.hosts.iter_mut().filter(|h| h.alerts == HostAlerts::Usual) {
+                host.watch.reset();
+            }
+        }
+        drop(state);
+        self.shared.notify();
+    }
+
+    /// Give a host alerts of its own, or the usual ones again.
+    pub fn set_host_alerts(&self, id: HostId, alerts: HostAlerts) {
+        let mut state = self.shared.write();
+        if let Some(host) = state.host_mut(id)
+            && host.alerts != alerts
+        {
+            host.alerts = alerts;
+            host.watch.reset();
+            host.version += 1;
+        }
+        drop(state);
+        self.shared.notify();
     }
 
     /// Lock the state for reading. Keep the guard short-lived: probes wait on it.
@@ -641,6 +774,7 @@ impl Monitor {
             host.history.clear();
             host.next_to_process = host.history.next_seq();
             host.loss_streak = 0;
+            host.watch.restart(host.next_to_process);
             host.exit_changes.clear();
             host.version += 1;
         }
@@ -791,6 +925,7 @@ fn without_os_error(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alerts::Limits;
     use crate::icmp::EchoStatus;
 
     fn reply(status: EchoStatus) -> EchoReply {
@@ -902,6 +1037,161 @@ mod tests {
         assert!(has_exit(), "other changes keep it");
         monitor.update_settings(|s| s.network_lookups = false);
         assert!(!has_exit());
+    }
+
+    /// Sends a probe a second for each status, starting at `t0`, and finishes each one.
+    fn probe_all(shared: &Shared, id: HostId, t0: f64, statuses: impl IntoIterator<Item = EchoStatus>) {
+        for (i, status) in statuses.into_iter().enumerate() {
+            let seq = shared.begin_probe(id, t0 + i as f64).unwrap();
+            shared.finish_probe(id, seq, reply(status), 3);
+        }
+    }
+
+    /// What the alert hook hears, from now on.
+    fn listen(shared: &Shared) -> Arc<Mutex<Vec<EventKind>>> {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&heard);
+        *shared.on_alert.write().unwrap() = Some(Box::new(move |alert: Alert| {
+            sink.lock().unwrap().push(alert.event.kind);
+        }));
+        heard
+    }
+
+    fn logged(shared: &Shared) -> Vec<(f64, EventKind)> {
+        shared.read().events.iter().map(|e| (e.at, e.kind.clone())).collect()
+    }
+
+    #[test]
+    fn outages_are_alerts_unless_turned_off() {
+        let (shared, id) = shared_with_host();
+        let heard = listen(&shared);
+        let outage = [
+            EchoStatus::Reply,
+            EchoStatus::TimedOut,
+            EchoStatus::TimedOut,
+            EchoStatus::TimedOut,
+            EchoStatus::Reply,
+        ];
+        probe_all(&shared, id, 0.0, outage);
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [EventKind::Down, EventKind::Up { outage_secs: 3.0 }]
+        );
+
+        heard.lock().unwrap().clear();
+        shared.write().hosts[0].alerts = HostAlerts::Off;
+        probe_all(&shared, id, 10.0, outage);
+        shared.write().hosts[0].alerts = HostAlerts::Usual;
+        shared.write().alerts.outages = false;
+        probe_all(&shared, id, 20.0, outage);
+        assert!(heard.lock().unwrap().is_empty(), "{:?}", heard.lock().unwrap());
+        assert_eq!(logged(&shared).len(), 6, "every outage is logged all the same");
+    }
+
+    #[test]
+    fn a_host_that_never_answered_raises_no_outage_alert() {
+        let (shared, id) = shared_with_host();
+        let heard = listen(&shared);
+        // An unused address, say: it goes down without having stopped answering, and
+        // its first reply ends no outage anyone was told about.
+        probe_all(&shared, id, 0.0, [EchoStatus::TimedOut; 4]);
+        probe_all(&shared, id, 4.0, [EchoStatus::Reply]);
+        assert!(heard.lock().unwrap().is_empty(), "{:?}", heard.lock().unwrap());
+        assert_eq!(logged(&shared).len(), 2, "both are logged all the same");
+
+        // Once it has answered, an outage is an alert.
+        let outage = [
+            EchoStatus::TimedOut,
+            EchoStatus::TimedOut,
+            EchoStatus::TimedOut,
+            EchoStatus::Reply,
+        ];
+        probe_all(&shared, id, 5.0, outage);
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [EventKind::Down, EventKind::Up { outage_secs: 3.0 }]
+        );
+    }
+
+    #[test]
+    fn alerts_name_a_renamed_host_by_its_new_name() {
+        let monitor = Monitor::new(ProbeSettings::default());
+        let id = monitor.add_for_test(TargetSpec::new("10.0.0.1"));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&heard);
+        monitor.set_on_alert(move |alert| {
+            let Event {
+                host_name,
+                host_address,
+                ..
+            } = alert.event;
+            sink.lock().unwrap().push((host_name, host_address));
+        });
+        probe_all(&monitor.shared, id, 0.0, [EchoStatus::Reply]);
+        monitor.set_label(id, Some("Office edge".into()));
+        probe_all(&monitor.shared, id, 1.0, [EchoStatus::TimedOut; 3]);
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [("Office edge".to_string(), "10.0.0.1".to_string())]
+        );
+    }
+
+    #[test]
+    fn scattered_loss_is_an_alert_until_it_has_stayed_away() {
+        let (shared, id) = shared_with_host();
+        let heard = listen(&shared);
+        // The usual limit would let this host be; its own doesn't.
+        shared.write().alerts.limits = Limits {
+            pings: 10,
+            loss_pct: Some(50.0),
+            slow_ms: None,
+        };
+        shared.write().hosts[0].alerts = HostAlerts::Own(Limits {
+            pings: 10,
+            loss_pct: Some(20.0),
+            slow_ms: None,
+        });
+        let mut statuses = vec![EchoStatus::Reply; 10];
+        statuses.extend([
+            EchoStatus::TimedOut,
+            EchoStatus::Reply,
+            EchoStatus::TimedOut,
+            EchoStatus::Reply,
+        ]);
+        statuses.extend([EchoStatus::Reply; 30]);
+        probe_all(&shared, id, 0.0, statuses);
+        // The alert comes at the reply after the second loss. The first loss leaves
+        // the window at ping 20, and the alert ends after ten replies within the limit.
+        let loss = EventKind::Loss {
+            lost: 2,
+            pings: 10,
+            limit_pct: 20.0,
+        };
+        let ended = EventKind::LossEnded {
+            limit_pct: 20.0,
+            pings: 10,
+        };
+        assert_eq!(logged(&shared), [(13.0, loss.clone()), (29.0, ended.clone())]);
+        assert_eq!(*heard.lock().unwrap(), [loss, ended]);
+    }
+
+    #[test]
+    fn an_outage_is_its_own_alert_and_its_loss_is_forgotten() {
+        let (shared, id) = shared_with_host();
+        shared.write().alerts.limits = Limits {
+            pings: 5,
+            loss_pct: Some(40.0),
+            slow_ms: None,
+        };
+        // Two lost pings would be over the limit, but the host was going down.
+        let mut statuses = vec![EchoStatus::Reply; 5];
+        statuses.extend([EchoStatus::TimedOut; 6]);
+        statuses.extend([EchoStatus::Reply; 10]);
+        probe_all(&shared, id, 0.0, statuses);
+        assert_eq!(
+            logged(&shared),
+            [(5.0, EventKind::Down), (11.0, EventKind::Up { outage_secs: 6.0 })]
+        );
     }
 
     #[test]
