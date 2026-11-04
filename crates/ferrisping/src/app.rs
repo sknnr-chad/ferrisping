@@ -49,6 +49,9 @@ const ROUTE_MIN_HEIGHT: f32 = 150.0;
 const ROUTE_FIT_SHARE: f32 = 0.55;
 /// Room the lanes keep when the route panel is dragged taller.
 const LANES_MIN_HEIGHT: f32 = 180.0;
+/// Room the lanes keep when the Events panel is dragged wider: what they have beside
+/// it at its usual width in the narrowest window.
+const LANES_MIN_WIDTH: f32 = 420.0;
 /// How long the status bar says probes are being skipped after the last one was.
 const SKIPPING_SHOWN_SECS: f64 = 10.0;
 /// What FerrisPing sends over the network, in full.
@@ -939,7 +942,7 @@ impl eframe::App for FerrisPingApp {
         egui::Panel::right("events")
             .resizable(true)
             .default_size(300.0)
-            .size_range(240.0..=520.0)
+            .size_range(240.0..=(ui.available_width() - LANES_MIN_WIDTH).clamp(240.0, 520.0))
             .frame(Frame::new().fill(p.surface).inner_margin(Margin::symmetric(16, 14)))
             .show_collapsible(ui, &mut show_events, |ui| events::show(ui, &state, &self.clock, p));
         self.show_events = show_events;

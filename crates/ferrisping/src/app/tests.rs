@@ -895,6 +895,109 @@ fn a_compact_lane_shows_the_address_too() {
     harness.get_by_label("Avg");
 }
 
+/// The text and buttons in the lanes, with where they are: what starts under the
+/// toolbar, above the status bar and left of the Events panel, whose edge comes too.
+fn lanes_text(harness: &Harness<'_, FerrisPingApp>) -> (Vec<(String, Rect)>, f32) {
+    use egui_kittest::kittest::By;
+    let toolbar = harness.get_by_label("More options").rect().bottom();
+    // The status bar starts with the button that shows and hides the events.
+    let events_button = |node: &egui_kittest::kittest::AccessKitNode<'_>| {
+        node.role() == Role::Button && node.label().is_some_and(|label| label.starts_with("Events"))
+    };
+    let status_bar = harness.get(By::new().predicate(events_button)).rect().top();
+    // The panel's title is set in from its edge.
+    let events = harness.get_by_role_and_label(Role::Label, "Events").rect().left() - 16.0;
+    let text = By::new().predicate(|node| matches!(node.role(), Role::Label | Role::Button));
+    let text = harness
+        .query_all(text)
+        .map(|node| {
+            // A label's text is its value.
+            let node_text = node.accesskit_node().label().or_else(|| node.accesskit_node().value());
+            (node_text.unwrap_or_default(), node.rect())
+        })
+        .filter(|(_, rect)| rect.top() > toolbar && rect.top() < status_bar && rect.left() < events)
+        .collect();
+    (text, events)
+}
+
+/// Checks that nothing in the lanes overlaps or reaches into the Events panel, and
+/// returns what's there.
+#[track_caller]
+fn lanes_text_apart(harness: &Harness<'_, FerrisPingApp>, case: &str) -> Vec<(String, Rect)> {
+    let (text, events) = lanes_text(harness);
+    for (i, (name, rect)) in text.iter().enumerate() {
+        assert!(
+            rect.right() <= events,
+            "{case}: {name} reaches into the events at {rect:?}"
+        );
+        for (other, other_rect) in &text[i + 1..] {
+            assert!(
+                !rect.shrink(0.5).intersects(other_rect.shrink(0.5)),
+                "{case}: {name} at {rect:?} overlaps {other} at {other_rect:?}"
+            );
+        }
+    }
+    text
+}
+
+#[test]
+fn lanes_keep_their_text_apart_in_the_narrowest_window_beside_the_events() {
+    for count in [1, 3, 12] {
+        for answering in [false, true] {
+            let mut harness = app_sized(Args::default(), window::MIN_SIZE);
+            made_up_lanes(&harness, count, answering);
+            harness.run_steps(3);
+            assert!(harness.state().show_events);
+            let state = if answering { "answering" } else { "waiting" };
+            let case = format!("{count} hosts {state}");
+            let text = lanes_text_apart(&harness, &case);
+            assert!(text.len() >= 2 * count.min(5), "{case}: {text:?}");
+            if !answering {
+                // Until the first reply, the graph says so, and that's text too.
+                let placeholder = |t: &str| matches!(t, "Waiting…" | "Waiting for the first reply…");
+                assert!(text.iter().any(|(t, _)| placeholder(t)), "{case}: {text:?}");
+            }
+
+            // The pointer on a lane brings out its buttons.
+            let first = lane_name(&harness, if answering { "Gateway" } else { "127.0.0.1" });
+            harness.hover_at(first.center());
+            harness.run_steps(2);
+            let case = format!("{case}, the pointer on one");
+            let text = lanes_text_apart(&harness, &case);
+            assert!(text.iter().any(|(t, _)| t.starts_with("Remove ")), "{case}: {text:?}");
+        }
+    }
+}
+
+#[test]
+fn the_events_keep_to_a_width_that_leaves_the_lanes_room() {
+    let mut harness = app_sized(Args::default(), window::SIZE);
+    made_up_lanes(&harness, 3, true);
+    harness.run_steps(3);
+    let edge = |h: &Harness<'_, FerrisPingApp>| lanes_text(h).1;
+    // Dragged as wide as it goes in the usual window...
+    let start = pos2(edge(&harness), 400.0);
+    harness.hover_at(start);
+    harness.step();
+    harness.drag_at(start);
+    harness.step();
+    for dx in [20.0, 120.0, 300.0] {
+        harness.hover_at(start - vec2(dx, 0.0));
+        harness.step();
+    }
+    harness.drop_at(start - vec2(300.0, 0.0));
+    harness.run_steps(3);
+    let width = window::SIZE.x - edge(&harness);
+    assert!((width - 520.0).abs() < 2.0, "the events are {width} wide");
+
+    // ...then the window made as narrow as it goes.
+    harness.set_size(window::MIN_SIZE);
+    harness.run_steps(3);
+    let width = window::MIN_SIZE.x - edge(&harness);
+    assert!(width <= 300.5, "the events are {width} wide");
+    lanes_text_apart(&harness, "after the window narrowed");
+}
+
 /// Opens the rename dialog from the menu of the lane named `name`.
 fn rename_lane(harness: &mut Harness<'_, FerrisPingApp>, name: &str) {
     click_at(harness, lane_name(harness, name).center(), PointerButton::Secondary);
@@ -1757,6 +1860,140 @@ fn render_switch() {
     });
     harness.run_steps(3);
     harness.render().unwrap().save(dir.join("ui-switch.png")).unwrap();
+}
+
+/// Renders lanes from the usual window down to the narrowest, with the events open and
+/// closed: one host, three and a dozen, waiting for a first reply or answering. Then
+/// the narrowest with jitter strips, and with the pointer on a name. Nothing is probed:
+/// `FERRISPING_RENDER_DIR=<dir> cargo test -p ferrisping -- --ignored render_narrow_lanes`
+#[test]
+#[ignore = "writes images; run by hand"]
+fn render_narrow_lanes() {
+    let dir = std::path::PathBuf::from(std::env::var("FERRISPING_RENDER_DIR").expect("set FERRISPING_RENDER_DIR"));
+    let sizes = [window::SIZE, vec2(860.0, 600.0), vec2(780.0, 520.0), window::MIN_SIZE];
+    for size in sizes {
+        for events in [true, false] {
+            for count in [1, 3, 12] {
+                for answering in [false, true] {
+                    let mut harness = screenshot_app(ThemeChoice::Dark, 15 * 60, size);
+                    harness.state_mut().show_events = events;
+                    made_up_lanes(&harness, count, answering);
+                    harness.run_steps(3);
+                    let events = if events { "events" } else { "no-events" };
+                    let state = if answering { "answering" } else { "waiting" };
+                    let file = format!("lanes-{}-{events}-{count}-{state}.png", size.x);
+                    harness.render().unwrap().save(dir.join(file)).unwrap();
+                }
+            }
+        }
+    }
+
+    for count in [1, 3] {
+        let mut harness = screenshot_app(ThemeChoice::Dark, 15 * 60, window::MIN_SIZE);
+        harness.state_mut().show_jitter = true;
+        made_up_lanes(&harness, count, true);
+        harness.run_steps(3);
+        let file = format!("lanes-narrowest-jitter-{count}.png");
+        harness.render().unwrap().save(dir.join(file)).unwrap();
+    }
+    let mut harness = screenshot_app(ThemeChoice::Dark, 15 * 60, window::MIN_SIZE);
+    made_up_lanes(&harness, 3, true);
+    harness.run_steps(3);
+    harness.hover_at(lane_name(&harness, "File server").center());
+    harness.run_steps(40);
+    harness
+        .render()
+        .unwrap()
+        .save(dir.join("lanes-narrowest-name-tooltip.png"))
+        .unwrap();
+}
+
+/// Adds `count` made-up hosts that are never probed. Waiting, they're loopback
+/// addresses, and a dozen has a name that can't be looked up and one being looked up,
+/// second and third, where they show without scrolling. Answering, they're named hosts
+/// with 15 minutes of round trips, one through another network and one back from an
+/// outage.
+fn made_up_lanes(harness: &Harness<'_, FerrisPingApp>, count: usize, answering: bool) {
+    const ANSWERING: [(&str, f32, f32); 12] = [
+        ("192.0.2.1 Gateway", 0.6, 0.3),
+        ("192.0.2.20 File server", 1.8, 0.5),
+        ("192.0.2.25 Hosted phones", 28.0, 6.0),
+        ("192.0.2.80 Branch office", 45.0, 4.0),
+        ("192.0.2.90 Frankfurt VPN", 120.0, 12.0),
+        ("192.0.2.40 Sydney office", 150.0, 2.0),
+        ("192.0.2.5 vcenter", 0.7, 0.3),
+        ("192.0.2.11 esxi-01", 0.4, 0.2),
+        ("192.0.2.12 esxi-02", 0.4, 0.2),
+        ("192.0.2.13 esxi-03", 0.5, 0.2),
+        ("192.0.2.14 esxi-04", 0.4, 0.2),
+        ("192.0.2.53", 13.0, 1.5),
+    ];
+    let monitor = &harness.state().monitor;
+    let now = now_secs();
+    if !answering {
+        let mut inputs: Vec<String> = (1..=count).map(|i| format!("127.0.0.{i}")).collect();
+        if count > 3 {
+            inputs.truncate(count - 2);
+            inputs.splice(1..1, ["printer.example".to_string(), "nas.example".to_string()]);
+        }
+        for input in &inputs {
+            monitor.add_for_test(TargetSpec::new(input));
+        }
+        monitor.edit_for_test(|state| {
+            for host in &mut state.hosts {
+                host.addr = host.spec.host.parse().ok();
+                if host.addr.is_some() {
+                    host.status = HostStatus::Waiting;
+                } else if host.spec.host == "printer.example" {
+                    host.status = HostStatus::ResolveFailed;
+                    host.resolve_error = Some("No such host is known. (os error 11001)".into());
+                }
+            }
+        });
+        return;
+    }
+    for (input, ..) in &ANSWERING[..count] {
+        monitor.add_for_test(parse_targets(input).remove(0));
+    }
+    monitor.edit_for_test(|state| {
+        let router = router("192.0.2.254");
+        state
+            .networks
+            .insert_for_test(router, 64500, "EXAMPLE-TRANSIT - Example Transit Networks, LLC, US");
+        let mut events = Vec::new();
+        for (i, (host, &(_, base_ms, spread_ms))) in state.hosts.iter_mut().zip(&ANSWERING).enumerate() {
+            // The file server was out from 4 minutes ago to 3.
+            let out = i == 1;
+            let down = |t: f64| out && (now - 240.0..now - 180.0).contains(&t);
+            make_up_samples(host, now, 15 * 60, Jitter::new(i as u64 + 71, base_ms, spread_ms), down);
+            (host.status, host.status_since) = (HostStatus::Up, now - 3.0 * 3600.0);
+            if out {
+                host.status_since = now - 180.0;
+                for (at, kind) in [
+                    (now - 240.0, EventKind::Down),
+                    (now - 180.0, EventKind::Up { outage_secs: 60.0 }),
+                ] {
+                    events.push(Event {
+                        at,
+                        host: host.id,
+                        host_name: host.name().to_string(),
+                        host_address: host.address(),
+                        kind,
+                    });
+                }
+            }
+            if i == 2 {
+                host.exit = Some(Exit {
+                    asn: 64500,
+                    router,
+                    hop: 2,
+                    since: now - 3.0 * 3600.0,
+                    seen: now - 10.0,
+                });
+            }
+        }
+        state.events.extend(events);
+    });
 }
 
 /// Renders a real route in a window tall enough to show all of it:
