@@ -3,6 +3,7 @@
 // Release builds are GUI-only; debug builds keep a console for panics and logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod add;
 mod alerts;
 mod app;
 mod args;

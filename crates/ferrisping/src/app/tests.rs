@@ -13,7 +13,7 @@ use eframe::egui::{
     self, Modifiers, PointerButton, Pos2, Rect, Vec2, ViewportCommand, ViewportEvent, ViewportId, pos2, vec2,
 };
 use egui_kittest::Harness;
-use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::kittest::{By, NodeT, Queryable};
 use ferrisping_core::{
     AlertSettings, EchoStatus, Event, EventKind, Exit, ExitChange, Host, HostAlerts, HostStatus, Limits, Outcome,
     RECENT_RESULTS, TargetSpec, now_secs, parse_targets,
@@ -141,7 +141,7 @@ fn typing_hosts_and_pressing_enter_adds_them() {
     harness.key_press(egui::Key::Enter);
     harness.run_steps(2);
     assert_eq!(hosts(&harness), ["127.0.0.1", "127.0.0.2"]);
-    assert!(harness.state().add_text.is_empty(), "the box clears after adding");
+    assert!(harness.state().adding.text.is_empty(), "the box clears after adding");
 }
 
 #[test]
@@ -165,6 +165,133 @@ fn adding_the_same_host_twice_is_ignored() {
     harness.get_by_label("Add").click();
     harness.run_steps(2);
     assert_eq!(hosts(&harness), ["127.0.0.1", "127.0.0.2", "LOCALHOST"]);
+}
+
+#[test]
+fn a_list_pasted_with_a_host_on_each_line_adds_every_host() {
+    let mut harness = app("");
+    harness.get_by_role(Role::TextInput).click();
+    harness.run_steps(2);
+    harness.event(egui::Event::Paste(
+        "127.0.0.1\r\n127.0.0.2\n\n127.0.0.3 Loopback\r\n".into(),
+    ));
+    harness.run_steps(1);
+    assert_eq!(harness.state().adding.text, "127.0.0.1, 127.0.0.2, 127.0.0.3 Loopback");
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert_eq!(hosts(&harness), ["127.0.0.1", "127.0.0.2", "127.0.0.3"]);
+    let state = harness.state().monitor.read();
+    assert_eq!(state.hosts[2].spec.label.as_deref(), Some("Loopback"));
+}
+
+/// What can be clicked or typed in on the toolbar, by name, with where it is.
+fn toolbar_controls(harness: &Harness<'_, FerrisPingApp>) -> Vec<(String, Rect)> {
+    let controls = By::new().predicate(|node| matches!(node.role(), Role::Button | Role::TextInput | Role::ComboBox));
+    harness
+        .query_all(controls)
+        .map(|node| (node.accesskit_node().label().unwrap_or_default(), node.rect()))
+        .filter(|(_, rect)| rect.bottom() < 60.0)
+        .collect()
+}
+
+#[test]
+fn the_toolbar_fits_every_window_down_to_the_narrowest() {
+    for width in [window::SIZE.x, 1040.0, 960.0, 860.0, 780.0, window::MIN_SIZE.x] {
+        let args = Args {
+            hosts: parse_targets("127.0.0.1"),
+            ..Args::default()
+        };
+        let harness = app_sized(args, vec2(width, 600.0));
+        let controls = toolbar_controls(&harness);
+        assert!(controls.len() >= 5, "the toolbar {width} wide has {controls:?}");
+        for (i, (name, rect)) in controls.iter().enumerate() {
+            assert!(
+                rect.left() >= 0.0 && rect.right() <= width,
+                "{name} is cut off in a window {width} wide: {rect:?}"
+            );
+            for (other, other_rect) in &controls[i + 1..] {
+                assert!(
+                    !rect.shrink(0.5).intersects(other_rect.shrink(0.5)),
+                    "{name} and {other} overlap in a window {width} wide"
+                );
+            }
+        }
+    }
+    // The widest window has room for everything, and the narrowest only for the least.
+    let wide = app_sized(Args::default(), window::SIZE);
+    assert!(wide.query_by_role(Role::TextInput).is_some());
+    assert!(wide.query_by_label("15m").is_some());
+    let narrow = app_sized(Args::default(), window::MIN_SIZE);
+    assert!(narrow.query_by_role(Role::TextInput).is_none());
+    assert!(narrow.query_by_label("Add hosts").is_some());
+    assert!(narrow.query_by_label("15m").is_none());
+}
+
+#[test]
+fn in_a_narrow_window_the_add_button_opens_a_box_for_a_list() {
+    let mut harness = app_sized(Args::default(), window::MIN_SIZE);
+    harness.get_by_label("Add hosts").click();
+    harness.run_steps(2);
+    assert!(
+        harness.get_by_role(Role::MultilineTextInput).is_focused(),
+        "the cursor is in the box"
+    );
+    harness.event(egui::Event::Paste("127.0.0.1\n127.0.0.2 Loopback".into()));
+    harness.run_steps(1);
+    harness.get_by_label("Add the list").click();
+    harness.run_steps(2);
+    assert_eq!(hosts(&harness), ["127.0.0.1", "127.0.0.2"]);
+    assert!(harness.query_by_label("Add the list").is_none(), "the panel closes");
+}
+
+#[test]
+fn the_narrowest_window_picks_the_time_shown_from_a_menu() {
+    let mut harness = app_sized(Args::default(), window::MIN_SIZE);
+    harness.state_mut().live = false;
+    harness.run_steps(1);
+    let menu = || harness.get_by_role_and_label(Role::ComboBox, "Time shown");
+    assert_eq!(menu().value().as_deref(), Some("1m"));
+    menu().click();
+    harness.run_steps(2);
+    harness.get_by_label("15m").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().window_secs, 900);
+    assert!(harness.state().live);
+}
+
+#[test]
+fn hosts_removed_or_added_before_can_be_added_again() {
+    let saved = saved_hosts(&["127.0.0.1", "127.0.0.2 Loopback two", "127.0.0.3"]);
+    let mut harness = app_saved(Args::default(), window::SIZE, saved);
+    for name in ["Loopback two", "127.0.0.3"] {
+        harness.hover_at(lane_name(&harness, name).center());
+        harness.run_steps(2);
+        harness.get_by_label(&format!("Remove {name}")).click();
+        harness.run_steps(2);
+    }
+    assert_eq!(hosts(&harness), ["127.0.0.1"]);
+
+    // Only what isn't watched is offered, newest first.
+    harness.get_by_label("More ways to add").click();
+    harness.run_steps(2);
+    let offered: Vec<String> = harness
+        .query_all(By::new().predicate(|node| node.role() == Role::Button))
+        .filter_map(|node| node.accesskit_node().label())
+        .filter(|label| label.starts_with("127."))
+        .collect();
+    assert_eq!(offered, ["127.0.0.3", "127.0.0.2 Loopback two"]);
+    harness.get_by_label("127.0.0.2 Loopback two").click();
+    harness.run_steps(2);
+    assert_eq!(hosts(&harness), ["127.0.0.1", "127.0.0.2"]);
+    assert!(harness.query_by_label("Loopback two").is_some(), "with its name");
+    assert_eq!(
+        saved_by(&mut harness).recent_hosts,
+        ["127.0.0.2 Loopback two", "127.0.0.3"]
+    );
+
+    harness.get_by_label("Clear").click();
+    harness.run_steps(2);
+    assert!(saved_by(&mut harness).recent_hosts.is_empty());
 }
 
 #[test]
@@ -1542,6 +1669,44 @@ fn render_states() {
         }
         harness.render().unwrap().save(dir.join(file)).unwrap();
     }
+}
+
+/// Renders the toolbar from the widest window down to the narrowest, and the add panel
+/// with hosts added before:
+/// `FERRISPING_RENDER_DIR=<dir> cargo test -p ferrisping -- --ignored render_toolbar`
+#[test]
+#[ignore = "writes images; run by hand"]
+fn render_toolbar() {
+    let dir = std::path::PathBuf::from(std::env::var("FERRISPING_RENDER_DIR").expect("set FERRISPING_RENDER_DIR"));
+    let saved = || saved_hosts(&["127.0.0.1 Gateway", "127.0.0.2", "127.0.0.3"]);
+    for width in [window::SIZE.x, 1040.0, 960.0, 860.0, window::MIN_SIZE.x] {
+        let mut harness = app_saved(Args::default(), vec2(width, 520.0), saved());
+        harness.run_steps(3);
+        let file = format!("ui-toolbar-{width}.png");
+        harness.render().unwrap().save(dir.join(file)).unwrap();
+    }
+
+    let mut harness = app_saved(Args::default(), vec2(window::SIZE.x, 640.0), saved());
+    harness.hover_at(lane_name(&harness, "127.0.0.3").center());
+    harness.run_steps(2);
+    harness.get_by_label("Remove 127.0.0.3").click();
+    harness.run_steps(2);
+    harness
+        .state_mut()
+        .adding
+        .remember("192.0.2.0/24, printer.example.com Front desk");
+    harness.get_by_label("More ways to add").click();
+    harness.run_steps(10);
+    harness.render().unwrap().save(dir.join("ui-add-panel.png")).unwrap();
+
+    let mut harness = app_saved(Args::default(), vec2(window::MIN_SIZE.x, 640.0), saved());
+    harness.get_by_label("Add hosts").click();
+    harness.run_steps(3);
+    harness
+        .render()
+        .unwrap()
+        .save(dir.join("ui-add-panel-narrow.png"))
+        .unwrap();
 }
 
 /// Renders lanes after a made-up switch from Lumen to Comcast, with its event and

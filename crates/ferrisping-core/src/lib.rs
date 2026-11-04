@@ -21,7 +21,7 @@ pub use exit::{CHECK_EVERY as EXIT_CHECK_EVERY, Exit, ExitChange};
 pub use history::{History, Outcome, Sample, WindowStats};
 pub use icmp::{EchoReply, EchoStatus, echo};
 pub use network::{NetworkInfo, Networks, Owner, is_public};
-pub use target::{Family, TargetSpec, parse_targets};
+pub use target::{Family, TargetSpec, entries, parse_targets};
 pub use trace::{Hop, HopAddr, RECENT_RESULTS, Route, Trace, TraceSettings};
 
 /// Seconds since the UNIX epoch: the time base for every sample and event.

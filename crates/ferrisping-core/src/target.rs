@@ -84,7 +84,7 @@ const MAX_RANGE: usize = 256;
 /// each address, without the label.
 pub fn parse_targets(input: &str) -> Vec<TargetSpec> {
     let mut specs = Vec::new();
-    for entry in input.split(['\n', '\r', ',', ';']) {
+    for entry in entries(input) {
         let mut words = entry.split_whitespace();
         let Some(host_word) = words.next() else {
             continue;
@@ -112,6 +112,15 @@ pub fn parse_targets(input: &str) -> Vec<TargetSpec> {
         }
     }
     specs
+}
+
+/// The add box's entries as typed, trimmed: the text between new lines, commas and
+/// semicolons, skipping empty ones.
+pub fn entries(input: &str) -> impl Iterator<Item = &str> {
+    input
+        .split(['\n', '\r', ',', ';'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
 }
 
 /// Why `host`, written as a range or a block, wasn't expanded: it's too big,

@@ -160,6 +160,7 @@ pub const ICON_PLAY: char = '\u{E768}';
 pub const ICON_PAUSE: char = '\u{E769}';
 pub const ICON_MORE: char = '\u{E712}';
 pub const ICON_CLOSE: char = '\u{E711}';
+pub const ICON_CHEVRON_DOWN: char = '\u{E70D}';
 
 /// Load fonts, install both themes' visuals and apply the chosen theme.
 pub fn install(ctx: &egui::Context, choice: ThemeChoice) {
