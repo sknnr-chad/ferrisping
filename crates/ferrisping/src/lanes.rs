@@ -660,7 +660,7 @@ fn graph(
             HostStatus::ResolveFailed => std::slice::from_ref(&error),
             _ => &["Waiting for the first reply…", "Waiting…"],
         };
-        placeholder(ui, *response.transform.frame(), wordings, p);
+        placeholder(&mut plot_ui, *response.transform.frame(), wordings, p);
     }
 
     let mut r = response.response;
@@ -690,6 +690,10 @@ fn graph(
 /// What a graph says until its first reply, in the middle of `frame`, the graph less
 /// its scale. It stays inside: the first of `wordings` that fits on a line, or else
 /// the last, wrapped onto as many lines as there's room for and cut short after that.
+///
+/// `ui` is the graph's own, with nothing after it. These words come and go, and a
+/// child Ui moves its parent's automatic Ids on, so in the lanes' Ui they'd change
+/// the Ids of every lane below and close a menu open on one.
 fn placeholder(ui: &mut Ui, frame: Rect, wordings: &[&str], p: &Palette) {
     let font = theme::font(13.0);
     let line_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
