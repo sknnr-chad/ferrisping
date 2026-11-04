@@ -87,15 +87,15 @@
         </li>
         <li>
           <h3>Continuous traceroute</h3>
-          <p>Every hop on the way to a host, measured again and again (like mtr or pathping), so loss and delay can be pinned on one hop.</p>
+          <p>Every hop on the way to a host, measured again and again (like mtr or pathping), so loss and delay can be pinned on one hop. To look back, Shift+drag across a graph for the routes the host's traffic took then, and where they changed.</p>
         </li>
         <li>
           <h3>The network your traffic leaves through</h3>
-          <p>Each lane names the first public network on its route (&ldquo;via Comcast&rdquo;), checks it every 30 seconds unless the host is down, and logs a change. That's handy at a site with two ISPs. You can rename networks to what you call them.</p>
+          <p>Each lane names the first public network on its route (&ldquo;via Comcast&rdquo;), checks it every 30 seconds, and logs a change. That's handy at a site with two ISPs. You can rename networks to what you call them.</p>
         </li>
         <li>
           <h3>Quick to fill</h3>
-          <p>Add names or addresses separated by commas, ranges like <code>10.0.0.1-20</code> or <code>10.0.0.1-10.0.0.20</code>, a subnet up to a /24 like <code>10.0.0.0/24</code> (without its network and broadcast addresses), IPv6 addresses, and a label after an address (<code>10.0.0.5 Office edge</code>).</p>
+          <p>Add names or addresses separated by commas, ranges like <code>10.0.0.1-20</code> or <code>10.0.0.1-10.0.0.20</code>, a subnet up to a /24 like <code>10.0.0.0/24</code> (without its network and broadcast addresses), IPv6 addresses, and a label after an address (<code>10.0.0.5 Office edge</code>). A list pasted with a host on each line adds every host, and the &#8964; beside the box opens a bigger box and the hosts you added or removed before, to add again with a click.</p>
         </li>
         <li>
           <h3>Jitter strips</h3>
@@ -114,6 +114,7 @@
       <h2>Trace a route, hop by hop</h2>
       <p class="section-lede">Hover a lane and click <strong>Route</strong>, or right-click it and choose <strong>Trace route</strong>. Each row is one hop: who answered, whose network it's on, the loss, and the last, average, best and worst round trips, with the latest results on the right.</p>
       <p class="section-lede"><strong>Copy report</strong> copies the table as text, for a ticket or a chat. Right-click a hop to watch it in a lane of its own.</p>
+      <p class="section-lede">To look back instead, Shift+drag across a host's graph. The routes its traffic took in that stretch of time show side by side, from the route checks FerrisPing makes every 30 seconds and keeps for a day. Each says when it was in use, how many checks saw it and how many of them the host answered. Hops that differ from the route before are highlighted, and a note says from which hop round trips got longer.</p>
       <figure class="shot">
         <picture>
           <source media="(prefers-color-scheme: dark)" type="image/webp" srcset="/img/route-dark-1180.webp 1180w, /img/route-dark-1770.webp 1770w" sizes="(min-width: 1152px) 1120px, calc(100vw - 2rem)">
@@ -137,6 +138,10 @@
           <dd>Usually that's the ISP your traffic goes out through, but a VPN, routers that don't answer, or a site with its own network number can make it something else. Treat a logged switch as a strong hint, not proof.</dd>
         </div>
         <div>
+          <dt>Routers that take turns at a hop aren't a change of route.</dt>
+          <dd>Load balancing spreads traffic over several routers, so a new router only counts as a change once it keeps answering where none of the route's own do. &ldquo;+1&rdquo; beside a router means another one took turns with it.</dd>
+        </div>
+        <div>
           <dt>Round trips under a millisecond are estimates.</dt>
           <dd>Windows reports whole milliseconds, so FerrisPing times each probe itself and takes off the measured timer overhead.</dd>
         </div>
@@ -150,7 +155,7 @@
         <h2>What FerrisPing sends over the network</h2>
         <ul class="sends">
           <li>Pings (ICMP echo requests) to each host you add, at the interval you pick: every second unless you change it.</li>
-          <li>For each host that isn't down, a short traceroute every 30 seconds, up to 12 hops, to find the first public network on its way.</li>
+          <li>For each host, a short traceroute every 30 seconds, up to 12 hops, to find the first public network on its way and keep a day of its routes. A host that's down gets one every 2 minutes instead, and only if it answered before.</li>
           <li>While a route is open, a traceroute to that host every second.</li>
           <li>DNS lookups through your usual DNS server:
             <ul>
@@ -162,7 +167,7 @@
         </ul>
         <p class="nothing-else">Nothing else: no telemetry, no update checks, no accounts.</p>
         <p>Pausing stops the pings and traceroutes.</p>
-        <p><strong>Check routes and look up networks</strong>, under More options (&#8943;) at the top right, turns off the 30-second traceroutes and the Team Cymru lookups. Lanes then don't name the network their traffic leaves through, switches aren't logged, and an open route says &ldquo;Lookups off&rdquo; instead of naming its routers' networks. Router names are still looked up. The setting is on unless you turn it off.</p>
+        <p><strong>Check routes and look up networks</strong>, under More options (&#8943;) at the top right, turns off those short traceroutes and the Team Cymru lookups. Lanes then don't name the network their traffic leaves through, switches aren't logged, routes aren't kept, and an open route says &ldquo;Lookups off&rdquo; instead of naming its routers' networks. Router names are still looked up. The setting is on unless you turn it off.</p>
         <p>The first time FerrisPing starts, it shows a summary of this list with the same choice, and doesn't check routes or look up networks until you've answered with OK. A one-off session started from the command line doesn't show the summary: until it has been answered, a session leaves the setting off unless you turn it on there.</p>
       </div>
       <aside class="card">
@@ -177,7 +182,7 @@
       <h2>Install</h2>
       <p><a href="https://github.com/sknnr-chad/ferrisping/releases/latest/download/ferrisping.exe">Download <code>ferrisping.exe</code></a> and run it. It runs on Windows 10 and 11. The <a href="https://github.com/sknnr-chad/ferrisping/releases/latest">latest release</a> on GitHub has its release notes and SHA-256.</p>
       <p class="callout">The exe isn't <a href="#code-signing-policy">code-signed</a> yet, so your browser may ask whether to keep it, and Windows SmartScreen may warn about it the first time: choose <strong>More info</strong>, then <strong>Run anyway</strong>.</p>
-      <p>It keeps your hosts, interval, time window, theme, network names and alerts in <code>%APPDATA%\FerrisPing</code>. Graphs and events are kept in memory only, so they start fresh each time. To uninstall FerrisPing, delete <code>ferrisping.exe</code> and that folder.</p>
+      <p>It keeps your hosts, the hosts you added before, interval, time window, theme, network names and alerts in <code>%APPDATA%\FerrisPing</code>. Graphs, routes and events are kept in memory only, so they start fresh each time. To uninstall FerrisPing, delete <code>ferrisping.exe</code> and that folder.</p>
       <p>Like any program with a tray icon, FerrisPing then shows up in Windows' own lists of tray icons (Settings &rsaquo; Personalization &rsaquo; Taskbar) and of programs that send notifications (Settings &rsaquo; System &rsaquo; Notifications, where you can turn its notifications off). Windows keeps those lists itself; FerrisPing doesn't write to the registry.</p>
       <h3>Command line</h3>
       <pre><code>ferrisping <span class="nw">[hosts...]</span> <span class="nw">[--interval 0.5]</span> <span class="nw">[--window 15m]</span> <span class="nw">[--theme dark|light|system]</span> <span class="nw">[--route &lt;host&gt;]</span></code></pre>
