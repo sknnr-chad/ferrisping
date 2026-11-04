@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 
+use eframe::egui::text::LayoutJob;
 use eframe::egui::{
     self, Align, Align2, Button, CornerRadius, Frame, Id, Label, Layout, Pos2, Rect, Response, RichText, Sense, Stroke,
     Ui, UiBuilder, pos2, vec2,
@@ -20,7 +21,25 @@ use crate::route_history::{self, RouteChange};
 use crate::series;
 use crate::theme::{self, Palette};
 
+/// How far a lane's text reaches from the lane's left edge: as far as it goes, and in
+/// the narrowest lane, with room for the name and two numbers.
 const INFO_WIDTH: f32 = 300.0;
+const INFO_MIN_WIDTH: f32 = 136.0;
+/// The narrowest a graph gets, its scale included. A lane too narrow for its text and
+/// this much graph takes the room from its text, which shows fewer numbers.
+const GRAPH_MIN_WIDTH: f32 = 170.0;
+/// Room between a lane's text and its graph, and right of the graph.
+const GRAPH_GAP: f32 = 16.0;
+const GRAPH_RIGHT: f32 = 10.0;
+/// A lane's numbers, in the order they show, and the room each takes. A lane too
+/// narrow for all five leaves out Min first, then Max, whose peaks the graph shows,
+/// then Jitter. The name's tooltip has all five.
+const NUMBERS: [&str; 5] = ["Avg", "Min", "Max", "Jitter", "Loss"];
+const LEFT_OUT_FIRST: [usize; 3] = [1, 2, 3];
+const NUMBER_WIDTH: f32 = 40.0;
+const NUMBER_GAP: f32 = 12.0;
+/// How far a full lane's numbers are set in from its name.
+const NUMBERS_INDENT: f32 = 18.0;
 /// How long a host's way out stays highlighted after it switched.
 const RECENT_SWITCH_SECS: f64 = 15.0 * 60.0;
 /// The name on a change of route's line.
@@ -121,6 +140,18 @@ fn lane_size(room: f32, count: usize) -> (f32, LaneStyle) {
     }
 }
 
+/// How far the text reaches from the left edge of a lane `width` wide. In a narrow
+/// lane the text gives up room before the graph does.
+fn info_width(width: f32) -> f32 {
+    (width - GRAPH_GAP - GRAPH_RIGHT - GRAPH_MIN_WIDTH).clamp(INFO_MIN_WIDTH, INFO_WIDTH)
+}
+
+/// How many of a lane's numbers fit side by side in `room`, two at the least.
+fn numbers_that_fit(room: f32) -> usize {
+    let fit = (room + NUMBER_GAP) / (NUMBER_WIDTH + NUMBER_GAP);
+    (fit.floor() as usize).clamp(2, NUMBERS.len())
+}
+
 pub fn show(ui: &mut Ui, state: &State, view: &View, clock: &Clock, p: &'static Palette) -> LanesOutput {
     let mut out = LanesOutput::default();
     let count = state.hosts.len();
@@ -193,13 +224,14 @@ fn lane(
         LaneStyle::Full => ((height - FULL_TEXT_HEIGHT).clamp(4.0, 10.0), 9.0),
         LaneStyle::Compact => (((height - COMPACT_TEXT_HEIGHT) / 2.0).clamp(3.0, 10.0), 8.0),
     };
+    let info_width = info_width(rect.width());
     let info_rect = Rect::from_min_max(
         pos2(rect.left() + 26.0, rect.top() + text_top),
-        pos2(rect.left() + INFO_WIDTH, rect.bottom() - 8.0),
+        pos2(rect.left() + info_width, rect.bottom() - 8.0),
     );
     let plot_rect = Rect::from_min_max(
-        pos2(rect.left() + INFO_WIDTH + 16.0, rect.top() + graph_inset),
-        pos2(rect.right() - 10.0, rect.bottom() - graph_inset),
+        pos2(rect.left() + info_width + GRAPH_GAP, rect.top() + graph_inset),
+        pos2(rect.right() - GRAPH_RIGHT, rect.bottom() - graph_inset),
     );
 
     let hovered = ui.rect_contains_pointer(rect);
@@ -237,10 +269,16 @@ fn info(
     // Plain text, so a right-click anywhere on the lane opens its menu instead of
     // being taken by a text selection.
     ui.style_mut().interaction.selectable_labels = false;
+    // A narrow lane has room for some of the numbers, a compact one for none.
+    let shown = if compact {
+        0
+    } else {
+        numbers_that_fit(rect.width() - NUMBERS_INDENT)
+    };
 
     // Name and address, with the latest round trip on the right, far enough off that
-    // the two numbers don't run together. A compact lane has no room for the other
-    // numbers, so the name's tooltip has them.
+    // the two numbers don't run together. When the lane has no room for all the
+    // other numbers, the name's tooltip has them.
     let (name_size, ms_size) = if compact { (14.0, 15.0) } else { (15.0, 19.0) };
     egui::Sides::new()
         .height(if compact { 20.0 } else { 24.0 })
@@ -253,11 +291,11 @@ fn info(
                 let (icon, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
                 theme::paint_status_icon(ui.painter(), icon.center(), 11.0, host.status, p);
                 let name = name_and_address(ui, host, name_size, p);
-                if compact {
+                if shown < NUMBERS.len() {
                     name.on_hover_ui(|ui| {
                         ui.label(full_name(host));
                         ui.add_space(4.0);
-                        numbers(ui, ("numbers-tooltip", host.id.0), stats, p);
+                        numbers(ui, ("numbers-tooltip", host.id.0), stats, NUMBERS.len(), p);
                     });
                 } else {
                     name.on_hover_text(full_name(host));
@@ -339,14 +377,15 @@ fn info(
     if !compact {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
-            ui.add_space(18.0);
-            numbers(ui, ("stats", host.id.0), stats, p);
+            ui.add_space(NUMBERS_INDENT);
+            numbers(ui, ("stats", host.id.0, shown), stats, shown, p);
         });
     }
 }
 
-/// Average, best, worst, jitter and loss over the visible time range.
-fn numbers(ui: &mut Ui, id: impl egui::AsIdSalt, stats: &WindowStats, p: &Palette) {
+/// Average, best, worst, jitter and loss over the visible time range, or the
+/// `shown` of them that stay when there's no room for all five.
+fn numbers(ui: &mut Ui, id: impl egui::AsIdSalt, stats: &WindowStats, shown: usize, p: &Palette) {
     let dash = || "—".to_string();
     let values = [
         stats.avg_ms.map(format::ms).unwrap_or_else(dash),
@@ -355,18 +394,20 @@ fn numbers(ui: &mut Ui, id: impl egui::AsIdSalt, stats: &WindowStats, p: &Palett
         stats.jitter_ms.map(format::ms).unwrap_or_else(dash),
         stats.loss_pct().map(format::percent).unwrap_or_else(dash),
     ];
+    let left_out = &LEFT_OUT_FIRST[..NUMBERS.len().saturating_sub(shown).min(LEFT_OUT_FIRST.len())];
+    let columns: Vec<usize> = (0..NUMBERS.len()).filter(|i| !left_out.contains(i)).collect();
     egui::Grid::new(id)
-        .num_columns(5)
-        .min_col_width(40.0)
+        .num_columns(columns.len())
+        .min_col_width(NUMBER_WIDTH)
         .min_row_height(15.0)
-        .spacing(vec2(12.0, 0.0))
+        .spacing(vec2(NUMBER_GAP, 0.0))
         .show(ui, |ui| {
-            for label in ["Avg", "Min", "Max", "Jitter", "Loss"] {
-                ui.label(RichText::new(label).size(11.5).color(p.text_muted));
+            for &i in &columns {
+                ui.label(RichText::new(NUMBERS[i]).size(11.5).color(p.text_muted));
             }
             ui.end_row();
-            for value in values {
-                ui.label(RichText::new(value).size(13.5).color(p.text_secondary));
+            for &i in &columns {
+                ui.label(RichText::new(&values[i]).size(13.5).color(p.text_secondary));
             }
             ui.end_row();
         });
@@ -671,21 +712,13 @@ fn graph(
     });
 
     if history.last_finished().is_none() {
-        let message = match host.status {
-            HostStatus::Resolving => "Looking up the address…".to_string(),
-            HostStatus::ResolveFailed => host
-                .resolve_error
-                .clone()
-                .unwrap_or_else(|| "Can't resolve this name".into()),
-            _ => "Waiting for the first reply…".to_string(),
+        let error = host.resolve_error.as_deref().unwrap_or("Can't resolve this name");
+        let wordings: &[&str] = match host.status {
+            HostStatus::Resolving => &["Looking up the address…", "Looking up…"],
+            HostStatus::ResolveFailed => std::slice::from_ref(&error),
+            _ => &["Waiting for the first reply…", "Waiting…"],
         };
-        ui.painter().text(
-            response.transform.frame().center(),
-            Align2::CENTER_CENTER,
-            message,
-            theme::font(13.0),
-            p.text_muted,
-        );
+        placeholder(&mut plot_ui, *response.transform.frame(), wordings, p);
     }
 
     let mut r = response.response;
@@ -766,6 +799,37 @@ fn pick_routes(
             true
         }
     }
+}
+
+/// What a graph says until its first reply, in the middle of `frame`, the graph less
+/// its scale. It stays inside: the first of `wordings` that fits on a line, or else
+/// the last, wrapped onto as many lines as there's room for and cut short after that.
+///
+/// `ui` is the graph's own, with nothing after it. These words come and go, and a
+/// child Ui moves its parent's automatic Ids on, so in the lanes' Ui they'd change
+/// the Ids of every lane below and close a menu open on one.
+fn placeholder(ui: &mut Ui, frame: Rect, wordings: &[&str], p: &Palette) {
+    let font = theme::font(13.0);
+    let line_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
+    let room = frame.shrink2(vec2(6.0, 0.0));
+    let layout = |text: &str, rows: usize| {
+        let mut job = LayoutJob::simple(text.to_string(), font.clone(), p.text_muted, room.width().max(0.0));
+        job.halign = Align::Center;
+        job.wrap.max_rows = rows;
+        // Cut short on one line, the text runs up to the "…" rather than stopping at a word.
+        job.wrap.break_anywhere = rows == 1;
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
+    };
+    let last = wordings.last().copied().unwrap_or_default();
+    let galley = wordings
+        .iter()
+        .map(|text| layout(text, 1))
+        .find(|galley| !galley.elided)
+        .unwrap_or_else(|| layout(last, ((room.height() / line_height) as usize).max(1)));
+    let rect = Rect::from_center_size(frame.center(), galley.size());
+    let mut ui = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Center)));
+    ui.set_clip_rect(frame.intersect(ui.clip_rect()));
+    ui.add(Label::new(galley).selectable(false));
 }
 
 /// A plot on the lanes' shared time axis. Dragging and zooming move it in time
