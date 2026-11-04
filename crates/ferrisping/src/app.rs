@@ -470,8 +470,8 @@ impl FerrisPingApp {
             if ui
                 .checkbox(&mut lookups, LOOKUPS_LABEL)
                 .on_hover_text(
-                    "Find the network each host's traffic leaves through, every 30 seconds, and ask \
-                     Team Cymru who runs the routers on a route",
+                    "Find the network each host's traffic leaves through and keep its routes, checking every \
+                     30 seconds, and ask Team Cymru who runs the routers on a route",
                 )
                 .changed()
             {
@@ -809,8 +809,9 @@ impl FerrisPingApp {
             for text in [
                 "FerrisPing pings each host you add, and looks up its name through your DNS server. An open \
                  route is traced every second, and its routers' names are looked up the same way.",
-                "To show which network each host's traffic leaves through (\"via Comcast\") and who runs each \
-                 router on a route, it can also trace the first hops to each host every 30 seconds, and ask \
+                "To show which network each host's traffic leaves through (\"via Comcast\"), the routes it \
+                 took over the last day and who runs each router on a route, it can also trace the first hops \
+                 to each host every 30 seconds, and ask \
                  Team Cymru's IP-to-ASN service who runs each public router it finds. Those router addresses \
                  reach your DNS server and Team Cymru.",
                 "Nothing else: no telemetry, no update checks, no accounts.",
