@@ -998,6 +998,26 @@ fn the_events_keep_to_a_width_that_leaves_the_lanes_room() {
     lanes_text_apart(&harness, "after the window narrowed");
 }
 
+#[test]
+fn a_lanes_menu_stays_open_when_a_host_above_it_first_answers() {
+    let mut harness = app_sized(Args::default(), window::SIZE);
+    made_up_lanes(&harness, 3, false);
+    harness.run_steps(3);
+    let name = lane_name(&harness, "127.0.0.3").center();
+    click_at(&harness, name, PointerButton::Secondary);
+    harness.run_steps(2);
+    harness.get_by_label("Move up");
+
+    // The first host's graph stops waiting and shows its line.
+    harness.state().monitor.edit_for_test(|state| {
+        make_up_samples(&mut state.hosts[0], now_secs(), 30, Jitter::new(1, 1.0, 0.2), |_| false);
+    });
+    harness.run_steps(2);
+    harness.get_by_label("Move up").click();
+    harness.run_steps(2);
+    assert_eq!(hosts(&harness), ["127.0.0.1", "127.0.0.3", "127.0.0.2"]);
+}
+
 /// Opens the rename dialog from the menu of the lane named `name`.
 fn rename_lane(harness: &mut Harness<'_, FerrisPingApp>, name: &str) {
     click_at(harness, lane_name(harness, name).center(), PointerButton::Secondary);
