@@ -23,7 +23,7 @@ pub use history::{History, Outcome, Sample, WindowStats};
 pub use icmp::{EchoReply, EchoStatus, echo};
 pub use network::{NetworkInfo, Networks, Owner, is_public};
 pub use paths::{IN_USE_SECS as PATH_IN_USE_SECS, Path, PathHop, PathSpan, Paths, RouterSeen, SpanHop};
-pub use target::{Family, TargetSpec, parse_targets};
+pub use target::{Family, TargetSpec, entries, parse_targets};
 pub use trace::{Hop, HopAddr, RECENT_RESULTS, Route, Trace, TraceSettings};
 
 /// Seconds since the UNIX epoch: the time base for every sample and event.

@@ -11,10 +11,11 @@ use eframe::egui::{
     vec2,
 };
 use ferrisping_core::{
-    HostId, HostStatus, Monitor, ProbeSettings, State, TargetSpec, TraceSettings, now_secs, parse_targets,
+    Host, HostId, HostStatus, Monitor, ProbeSettings, State, TargetSpec, TraceSettings, now_secs, parse_targets,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::add::{self, Adding};
 use crate::alerts::{AlertChoices, AlertsDialog, HostAlertsDialog, HostChoice, Outcome};
 use crate::args::Args;
 use crate::events;
@@ -83,6 +84,8 @@ struct Saved {
     close_to_tray: bool,
     /// The banner saying FerrisPing still runs in the tray has been shown.
     tray_tip_shown: bool,
+    /// Hosts added or removed before, as typed and newest first, to add again.
+    recent_hosts: Vec<String>,
 }
 
 impl Default for Saved {
@@ -101,6 +104,7 @@ impl Default for Saved {
             host_alerts: BTreeMap::new(),
             close_to_tray: false,
             tray_tip_shown: false,
+            recent_hosts: Vec::new(),
         }
     }
 }
@@ -182,7 +186,10 @@ pub struct FerrisPingApp {
     /// How soon to redraw after new samples arrive, in ms (shared with the engine callback).
     redraw_ms: Arc<AtomicU64>,
     clock: Clock,
-    add_text: String,
+    adding: Adding,
+    /// The toolbar has only the Add button, as the window is too narrow for the box.
+    add_folded: bool,
+    toolbar_widths: ToolbarWidths,
     window_secs: u64,
     live: bool,
     /// Visible time range the graphs reported last frame.
@@ -285,7 +292,9 @@ impl FerrisPingApp {
             monitor,
             redraw_ms,
             clock: Clock::new(),
-            add_text: String::new(),
+            adding: Adding::new(saved.recent_hosts),
+            add_folded: false,
+            toolbar_widths: ToolbarWidths::default(),
             window_secs,
             live: true,
             bounds: None,
@@ -378,7 +387,14 @@ impl FerrisPingApp {
         tray.set_status(&tip, paused);
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, p: &Palette, settings: &ProbeSettings, actions: &mut Vec<Action>) {
+    fn toolbar(
+        &mut self,
+        ui: &mut Ui,
+        p: &Palette,
+        settings: &ProbeSettings,
+        hosts: &[Host],
+        actions: &mut Vec<Action>,
+    ) {
         egui::Panel::top("toolbar")
             .frame(Frame::new().fill(p.surface).inner_margin(Margin::symmetric(16, 10)))
             .show(ui, |ui| {
@@ -390,10 +406,26 @@ impl FerrisPingApp {
                             .color(p.text),
                     );
                     ui.add_space(16.0);
-                    self.add_box(ui, p, actions);
+
+                    // What fits comes from widths measured in earlier frames. When one
+                    // changes, the frame is drawn again before it's shown.
+                    let fit = self
+                        .toolbar_widths
+                        .fit(ui.available_width(), ui.spacing().item_spacing.x);
+                    let mut widths = self.toolbar_widths;
+                    let out = add::show(ui, &mut self.adding, p, fit.add, hosts);
+                    self.add_folded = fit.add == add::Form::Button;
+                    widths.add = out.add_width;
+                    if let Some(more) = out.more_width {
+                        widths.more = more;
+                    }
+                    for input in out.inputs {
+                        self.adding.remember(&input);
+                        actions.push(Action::Add(parse_targets(&input)));
+                    }
 
                     // The right-hand group is laid out right to left.
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let controls = ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         self.overflow_menu(ui, p, settings, actions);
                         let (glyph, fallback, label) = if settings.paused {
                             (theme::ICON_PLAY, "▶", "Resume")
@@ -414,40 +446,26 @@ impl FerrisPingApp {
                             self.live = true;
                         }
                         ui.add_space(8.0);
-                        if segmented(ui, p, &mut self.window_secs, &WINDOWS) {
+                        let changed = if fit.spans_menu {
+                            spans_menu(ui, &mut self.window_secs, &WINDOWS)
+                        } else {
+                            segmented(ui, p, &mut self.window_secs, &WINDOWS)
+                        };
+                        if changed {
                             self.live = true;
                         }
                         ui.add_space(8.0);
                         interval_picker(ui, settings, actions);
                     });
+                    if !fit.spans_menu {
+                        widths.controls = widths.controls.max(controls.response.rect.width());
+                    }
+                    if !widths.same_as(&self.toolbar_widths) {
+                        self.toolbar_widths = widths;
+                        ui.ctx().request_discard("the toolbar measured its controls");
+                    }
                 });
             });
-    }
-
-    fn add_box(&mut self, ui: &mut Ui, p: &Palette, actions: &mut Vec<Action>) {
-        // Leave room for the controls on the right when the window is narrow.
-        let width = (ui.available_width() - 680.0).clamp(150.0, 300.0);
-        let edit = TextEdit::singleline(&mut self.add_text)
-            .hint_text("Add hosts: names or IPs, comma-separated")
-            .desired_width(width)
-            .margin(Margin::symmetric(8, 5));
-        let response = ui.add(edit);
-        let entered = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-        let label = format!("{}  Add", theme::icon(theme::ICON_ADD, "+"));
-        let clicked = ui
-            .add_enabled(!self.add_text.trim().is_empty(), accent_button(p, &label))
-            .accessible_name("Add")
-            .clicked();
-        if entered || clicked {
-            let specs = parse_targets(&self.add_text);
-            if !specs.is_empty() {
-                actions.push(Action::Add(specs));
-                self.add_text.clear();
-            }
-            if entered {
-                response.request_focus();
-            }
-        }
     }
 
     fn overflow_menu(&mut self, ui: &mut Ui, p: &Palette, settings: &ProbeSettings, actions: &mut Vec<Action>) {
@@ -554,11 +572,16 @@ impl FerrisPingApp {
                     .color(p.text),
             );
             ui.add_space(6.0);
+            let how = if self.add_folded {
+                "Click Add above and type a host name or IP address."
+            } else {
+                "Type a host name or IP address in the box above."
+            };
             ui.label(
-                RichText::new(
-                    "Type a host name or IP address in the box above. Add several at once \
-                     with commas, a range like 10.0.0.1-20, or a subnet like 10.0.0.0/24.",
-                )
+                RichText::new(format!(
+                    "{how} Add several at once with commas, a range like 10.0.0.1-20, or a \
+                     subnet like 10.0.0.0/24."
+                ))
                 .color(p.text_secondary),
             );
             ui.add_space(18.0);
@@ -584,6 +607,7 @@ impl FerrisPingApp {
                 ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
                 for host in QUICK_HOSTS {
                     if ui.button(host).clicked() {
+                        self.adding.remember(host);
                         actions.push(Action::Add(parse_targets(host)));
                     }
                 }
@@ -618,6 +642,11 @@ impl FerrisPingApp {
                     }
                     if self.routes_seen.as_ref().is_some_and(|seen| seen.host == id) {
                         self.routes_seen = None;
+                    }
+                    // Kept with the hosts added before, to add again.
+                    let input = self.monitor.read().host(id).map(|h| h.spec.to_input());
+                    if let Some(input) = input {
+                        self.adding.remember(&input);
                     }
                     self.monitor.remove(id);
                 }
@@ -659,7 +688,10 @@ impl FerrisPingApp {
                         view.trace.restart();
                     }
                 }
-                Action::Route(RouteAction::Watch(addr)) => add_hosts(&self.monitor, parse_targets(&addr)),
+                Action::Route(RouteAction::Watch(addr)) => {
+                    self.adding.remember(&addr);
+                    add_hosts(&self.monitor, parse_targets(&addr));
+                }
                 Action::Lane(LaneAction::Alerts(id)) => {
                     let state = self.monitor.read();
                     if let Some(host) = state.host(id) {
@@ -920,7 +952,7 @@ impl eframe::App for FerrisPingApp {
         let state = monitor.read();
         let mut actions = Vec::new();
 
-        self.toolbar(ui, p, &settings, &mut actions);
+        self.toolbar(ui, p, &settings, &state.hosts, &mut actions);
         self.status_bar(ui, p, &state, &settings, now);
         let mut show_events = self.show_events;
         egui::Panel::right("events")
@@ -1068,6 +1100,7 @@ impl eframe::App for FerrisPingApp {
                 .collect(),
             close_to_tray: self.close_to_tray,
             tray_tip_shown: self.tray_tip_shown,
+            recent_hosts: self.adding.recent.clone(),
         };
         drop(state);
         eframe::set_value(storage, STORAGE_KEY, &saved);
@@ -1171,6 +1204,74 @@ fn interval_picker(ui: &mut Ui, settings: &ProbeSettings, actions: &mut Vec<Acti
     if chosen != current {
         actions.push(Action::SetInterval(Duration::from_millis(chosen)));
     }
+}
+
+/// Widths the toolbar measured in earlier frames, to fit a narrow window. Zero until
+/// measured.
+#[derive(Clone, Copy, Debug, Default)]
+struct ToolbarWidths {
+    /// The controls on the right, with the window spans as buttons, at their widest so
+    /// far: "Back to live" and "Resume" take more room than what they replace.
+    controls: f32,
+    /// The Add button, and the ⌄ button beside the box.
+    add: f32,
+    more: f32,
+}
+
+/// What the toolbar shows in a window of its width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ToolbarFit {
+    add: add::Form,
+    /// The window spans as a menu rather than a row of buttons.
+    spans_menu: bool,
+}
+
+impl ToolbarWidths {
+    /// The most the toolbar can show in `room`, what's left after the logo and name,
+    /// with `gap` between controls. The add box folds into its button first, and then
+    /// the window spans into a menu.
+    fn fit(&self, room: f32, gap: f32) -> ToolbarFit {
+        let box_room = room - self.controls - (self.more + self.add + 3.0 * gap);
+        if box_room >= add::BOX_MIN {
+            ToolbarFit {
+                add: add::Form::Box(box_room.min(add::BOX_MAX)),
+                spans_menu: false,
+            }
+        } else {
+            ToolbarFit {
+                add: add::Form::Button,
+                spans_menu: self.add + gap + self.controls > room,
+            }
+        }
+    }
+
+    /// Whether these are the widths `other` measured, give or take rounding.
+    fn same_as(&self, other: &Self) -> bool {
+        let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+        close(self.controls, other.controls) && close(self.add, other.add) && close(self.more, other.more)
+    }
+}
+
+/// The window spans as a menu, for a toolbar too narrow for the row of buttons. Returns
+/// true when the value changed.
+fn spans_menu(ui: &mut Ui, value: &mut u64, options: &[(u64, &str)]) -> bool {
+    let before = *value;
+    let current = options
+        .iter()
+        .find(|(option, _)| *option == *value)
+        .map_or_else(|| format::duration(*value as f64), |(_, label)| label.to_string());
+    ComboBox::from_id_salt("window")
+        .selected_text(current)
+        .width(56.0)
+        .show_ui(ui, |ui| {
+            for &(option, label) in options {
+                ui.selectable_value(value, option, label);
+            }
+        })
+        .response
+        .on_hover_text("How much time the graphs show")
+        .accessible_name("Time shown");
+    *value != before
 }
 
 /// A row of mutually exclusive buttons. Returns true when the value changed.

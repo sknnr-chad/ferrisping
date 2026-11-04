@@ -37,7 +37,9 @@ FerrisPing is new (version 0.3). It runs on Windows 10 and 11; macOS and Linux a
   time, and where they differ. A dotted line on the graph marks each change of route.
 - **Quick to fill**: add names or addresses separated by commas, ranges like `10.0.0.1-20` or `10.0.0.1-10.0.0.20`,
   a subnet up to a /24 like `10.0.0.0/24` (without its network and broadcast addresses), IPv6 addresses, and a
-  label after an address (`10.0.0.5 Office edge`).
+  label after an address (`10.0.0.5 Office edge`). A list pasted with a host on each line adds every host. The ⌄
+  beside the box opens a bigger box, and the hosts you added or removed before, to add again with a click. In a
+  narrow window the toolbar keeps just an **Add** button, which opens the same panel.
 - **No admin rights, no installer**: one .exe that pings with the same Windows ICMP API as `ping.exe` and
   `tracert.exe`.
 - **Jitter strips**: turn on **Show jitter under graphs**, in More options (⋯), for a strip under each graph with
@@ -47,9 +49,10 @@ FerrisPing is new (version 0.3). It runs on Windows 10 and 11; macOS and Linux a
 
 ## Install
 
-Download `ferrisping.exe` from [Releases](../../releases) and run it. It keeps your hosts, interval, time window,
-theme, network names and alerts in `%APPDATA%\FerrisPing`. Graphs, routes and events are kept in memory only, so
-they start fresh each time. To uninstall FerrisPing, delete `ferrisping.exe` and that folder.
+Download `ferrisping.exe` from [Releases](../../releases) and run it. It keeps your hosts, the hosts you added
+before, interval, time window, theme, network names and alerts in `%APPDATA%\FerrisPing`. Graphs, routes and events
+are kept in memory only, so they start fresh each time. To uninstall FerrisPing, delete `ferrisping.exe` and that
+folder.
 
 Like any program with a tray icon, FerrisPing then shows up in Windows' own lists of tray icons (Settings ›
 Personalization › Taskbar) and of programs that send notifications (Settings › System › Notifications, where you
