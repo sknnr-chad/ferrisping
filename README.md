@@ -31,8 +31,10 @@ FerrisPing is new (version 0.3). It runs on Windows 10 and 11; macOS and Linux a
 - **Continuous traceroute**: every hop on the way to a host, measured again and again (like mtr or pathping), so
   loss and delay can be pinned on one hop.
 - **The network your traffic leaves through**: each lane names the first public network on its route
-  ("via Comcast"), checks it every 30 seconds unless the host is down, and logs a change. That's handy at a site
-  with two ISPs. You can rename networks to what you call them.
+  ("via Comcast"), checks it every 30 seconds, and logs a change. That's handy at a site with two ISPs. You can
+  rename networks to what you call them.
+- **Routes over time**: Shift+drag across a graph to see the routes the host's traffic took in that stretch of
+  time, and where they differ. A dotted line on the graph marks each change of route.
 - **Quick to fill**: add names or addresses separated by commas, ranges like `10.0.0.1-20` or `10.0.0.1-10.0.0.20`,
   a subnet up to a /24 like `10.0.0.0/24` (without its network and broadcast addresses), IPv6 addresses, and a
   label after an address (`10.0.0.5 Office edge`).
@@ -46,8 +48,8 @@ FerrisPing is new (version 0.3). It runs on Windows 10 and 11; macOS and Linux a
 ## Install
 
 Download `ferrisping.exe` from [Releases](../../releases) and run it. It keeps your hosts, interval, time window,
-theme, network names and alerts in `%APPDATA%\FerrisPing`. Graphs and events are kept in memory only, so they
-start fresh each time. To uninstall FerrisPing, delete `ferrisping.exe` and that folder.
+theme, network names and alerts in `%APPDATA%\FerrisPing`. Graphs, routes and events are kept in memory only, so
+they start fresh each time. To uninstall FerrisPing, delete `ferrisping.exe` and that folder.
 
 Like any program with a tray icon, FerrisPing then shows up in Windows' own lists of tray icons (Settings ›
 Personalization › Taskbar) and of programs that send notifications (Settings › System › Notifications, where you
@@ -78,6 +80,11 @@ whose network it's on, the loss, and the last, average, best and worst round tri
 right. **Copy report** copies the table as text, for a ticket or a chat. Right-click a hop to watch it in a lane of
 its own.
 
+To look back instead, Shift+drag across a host's graph. The routes its traffic took in that stretch of time show
+side by side, from the route checks FerrisPing makes every 30 seconds and keeps for a day. Each says when it was in
+use, how many checks saw it and how many of them the host answered. Hops that differ from the route before are
+highlighted, and a note says from which hop round trips got longer.
+
 ## Reading the numbers
 
 - **Loss at a hop in the middle of a route isn't always real.** Routers often limit how many traceroute replies
@@ -86,14 +93,18 @@ its own.
 - **"via Comcast" is the first public network on the route.** Usually that's the ISP your traffic goes out
   through, but a VPN, routers that don't answer, or a site with its own network number can make it something else.
   Treat a logged switch as a strong hint, not proof.
+- **Routers that take turns at a hop aren't a change of route.** Load balancing spreads traffic over several
+  routers, so a new router only counts as a change once it keeps answering where none of the route's own do. "+1"
+  beside a router means another one took turns with it.
 - **Round trips under a millisecond are estimates.** Windows reports whole milliseconds, so FerrisPing times each
   probe itself and takes off the measured timer overhead.
 
 ## What FerrisPing sends over the network
 
 - Pings (ICMP echo requests) to each host you add, at the interval you pick: every second unless you change it.
-- For each host that isn't down, a short traceroute every 30 seconds, up to 12 hops, to find the first public
-  network on its way.
+- For each host, a short traceroute every 30 seconds, up to 12 hops, to find the first public network on its way
+  and keep a day of its routes. A host that's down gets one every 2 minutes instead, and only if it answered
+  before.
 - While a route is open, a traceroute to that host every second.
 - DNS lookups through your usual DNS server:
   - the names of the hosts you add;
@@ -104,9 +115,9 @@ its own.
 
 Nothing else: no telemetry, no update checks, no accounts. Pausing stops the pings and traceroutes.
 
-**Check routes and look up networks**, under More options (⋯) at the top right, turns off the 30-second
-traceroutes and the Team Cymru lookups. Lanes then don't name the network their traffic leaves through, switches
-aren't logged, and an open route says "Lookups off" instead of naming its routers' networks. Router names are still
+**Check routes and look up networks**, under More options (⋯) at the top right, turns off those short traceroutes
+and the Team Cymru lookups. Lanes then don't name the network their traffic leaves through, switches aren't logged,
+routes aren't kept, and an open route says "Lookups off" instead of naming its routers' networks. Router names are still
 looked up. The setting is on unless you turn it off.
 
 The first time FerrisPing starts, it shows a summary of this list with the same choice, and doesn't check routes or

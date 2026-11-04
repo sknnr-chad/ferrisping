@@ -20,7 +20,8 @@ use crate::args::Args;
 use crate::events;
 use crate::format::{self, Clock};
 use crate::lanes::{self, LaneAction, View};
-use crate::route::{self, RouteAction, RouteView};
+use crate::route::{self, RouteAction, RouteOutput, RouteView};
+use crate::route_history::{self, RouteHistory};
 use crate::theme::{self, Palette, ThemeChoice};
 use crate::tray::{self, Tray, TrayCommand};
 
@@ -197,6 +198,9 @@ pub struct FerrisPingApp {
     route_fit: f32,
     /// A host named with `--route`, traced once its address is known.
     route_on_start: Option<TargetSpec>,
+    /// The routes a host's traffic took in a stretch of time picked on its graph,
+    /// shown in the route panel's place while it's open.
+    routes_seen: Option<RouteHistory>,
     rename: Option<Rename>,
     notice: Option<Notice>,
     /// The notice has been answered, on this run or an earlier one.
@@ -292,6 +296,7 @@ impl FerrisPingApp {
             route_height: None,
             route_fit: ROUTE_MIN_HEIGHT,
             route_on_start: args.route,
+            routes_seen: None,
             rename: None,
             notice,
             notice_answered: saved.notice_answered,
@@ -599,6 +604,7 @@ impl FerrisPingApp {
             live: self.live,
             interval: settings.interval.as_secs_f64(),
             jitter: self.show_jitter,
+            span: self.routes_seen.as_ref().map(|seen| (seen.host, seen.t0, seen.t1)),
         }
     }
 
@@ -609,6 +615,9 @@ impl FerrisPingApp {
                 Action::Lane(LaneAction::Remove(id)) => {
                     if self.route.as_ref().is_some_and(|view| view.host == id) {
                         self.route = None;
+                    }
+                    if self.routes_seen.as_ref().is_some_and(|seen| seen.host == id) {
+                        self.routes_seen = None;
                     }
                     self.monitor.remove(id);
                 }
@@ -625,6 +634,7 @@ impl FerrisPingApp {
                         .find(|h| h.id == id)
                         .and_then(|h| h.addr);
                     let Some(addr) = addr else { continue };
+                    self.routes_seen = None;
                     // Asking again for the route already shown keeps its numbers.
                     let shown = self
                         .route
@@ -635,7 +645,15 @@ impl FerrisPingApp {
                         self.route = Some(RouteView { host: id, trace });
                     }
                 }
-                Action::Route(RouteAction::Close) => self.route = None,
+                Action::Lane(LaneAction::Routes(id, t0, t1)) => {
+                    self.route = None;
+                    self.routes_seen = Some(RouteHistory::new(id, t0, t1));
+                }
+                Action::Route(RouteAction::Close) => {
+                    self.route = None;
+                    self.routes_seen = None;
+                }
+                Action::Route(RouteAction::LookUpOwners(addrs)) => self.monitor.look_up_owners(addrs),
                 Action::Route(RouteAction::Restart) => {
                     if let Some(view) = &self.route {
                         view.trace.restart();
@@ -919,8 +937,10 @@ impl eframe::App for FerrisPingApp {
             self.route_on_start = None;
         }
         let mut route_out = None;
-        if let Some(view) = &self.route
-            && let Some(host) = state.hosts.iter().find(|h| h.id == view.host)
+        let panel_host =
+            (self.route.as_ref().map(|view| view.host)).or(self.routes_seen.as_ref().map(|seen| seen.host));
+        if let Some(id) = panel_host
+            && let Some(host) = state.hosts.iter().find(|h| h.id == id)
         {
             let room = ui.available_height();
             // Lanes that don't need all the room leave it to the route, so the two
@@ -943,7 +963,12 @@ impl eframe::App for FerrisPingApp {
                         networks: &state.networks,
                         lookups: settings.network_lookups,
                     };
-                    let out = route::show(ui, view, host, owners, &self.clock, p);
+                    // The traceroute, or the routes seen in a stretch of time.
+                    let out = match (&self.route, &mut self.routes_seen) {
+                        (Some(view), _) => route::show(ui, view, host, owners, &self.clock, p),
+                        (None, Some(seen)) => route_history::show(ui, seen, host, owners, &self.clock, p),
+                        (None, None) => RouteOutput::default(),
+                    };
                     route_out = Some((room, height, out));
                 });
         }

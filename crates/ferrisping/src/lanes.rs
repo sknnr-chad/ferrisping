@@ -6,8 +6,8 @@
 use std::cell::RefCell;
 
 use eframe::egui::{
-    self, Align, Align2, Button, CornerRadius, Frame, Id, Label, Layout, Rect, Response, RichText, Sense, Stroke, Ui,
-    UiBuilder, pos2, vec2,
+    self, Align, Align2, Button, CornerRadius, Frame, Id, Label, Layout, Pos2, Rect, Response, RichText, Sense, Stroke,
+    Ui, UiBuilder, pos2, vec2,
 };
 use egui_plot::{
     AxisHints, GridInput, HPlacement, HoverPosition, Line, LineStyle, Plot, PlotPoint, PlotPoints, PlotTransform,
@@ -16,12 +16,15 @@ use egui_plot::{
 use ferrisping_core::{Exit, History, Host, HostId, HostStatus, Networks, Outcome, State, WindowStats};
 
 use crate::format::{self, Clock};
+use crate::route_history::{self, RouteChange};
 use crate::series;
 use crate::theme::{self, Palette};
 
 const INFO_WIDTH: f32 = 300.0;
 /// How long a host's way out stays highlighted after it switched.
 const RECENT_SWITCH_SECS: f64 = 15.0 * 60.0;
+/// The name on a change of route's line.
+const ROUTE_NAME: &str = "new route";
 const HEADER_HEIGHT: f32 = 30.0;
 const MAX_LANE_HEIGHT: f32 = 170.0;
 /// The shortest lane with room for the numbers.
@@ -54,6 +57,8 @@ pub struct View {
     pub interval: f64,
     /// Show jitter: in a strip under each full lane's graph, and in the graphs' hover text.
     pub jitter: bool,
+    /// The stretch of time picked on a host's graph for its routes, shaded there.
+    pub span: Option<(HostId, f64, f64)>,
 }
 
 /// A change the user asked for, applied after the state lock is released.
@@ -69,6 +74,8 @@ pub enum LaneAction {
     RenameNetwork(u32),
     /// Open the host's Alerts dialog.
     Alerts(HostId),
+    /// Show the routes the host's traffic took between these times.
+    Routes(HostId, f64, f64),
 }
 
 /// A switch to another way out, ready to draw on a graph.
@@ -443,9 +450,11 @@ fn exit_label(ui: &mut Ui, host: &Host, exit: &Exit, networks: &Networks, now: f
         ui.label(
             RichText::new(format!(
                 "It's the first public network on the route: usually, but not always, the ISP this \
-                 traffic goes out through. Checked every {} unless the host is down. Right-click the lane \
-                 to rename this network.",
-                format::interval(ferrisping_core::EXIT_CHECK_EVERY)
+                 traffic goes out through. Checked every {}, and every {} while the host is down. \
+                 Shift+drag across the graph to see the routes the traffic took at the time. Right-click \
+                 the lane to rename this network.",
+                format::interval(ferrisping_core::EXIT_CHECK_EVERY),
+                format::interval(ferrisping_core::EXIT_DOWN_CHECK_EVERY)
             ))
             .color(p.text_muted),
         );
@@ -507,6 +516,15 @@ fn graph(
         })
         .collect();
     let switches = &switches;
+    let route_changes = route_history::changes(host);
+    let route_changes = &route_changes;
+    // Shift+drag picks a stretch of time, to see the routes the traffic took then.
+    // Meanwhile the graphs stay put.
+    let pick_id = Id::unique(("pick-routes", host.id.0));
+    let picking: Option<(f64, f64)> = ui.data(|d| d.get_temp(pick_id));
+    let shift = ui.input(|i| i.modifiers.shift);
+    let pan = !shift && picking.is_none();
+    let picked = picking.or_else(|| view.span.filter(|&(id, ..)| id == host.id).map(|(_, a, b)| (a, b)));
     let jitter = view.jitter;
     // The jitter line as built with the graph, for the strip to draw and for the
     // hover text, which egui_plot asks for once the lines are in.
@@ -518,6 +536,7 @@ fn graph(
             history,
             &drawn_jitter.borrow(),
             switches,
+            route_changes,
             clock,
             interval,
             secs_per_point,
@@ -542,9 +561,11 @@ fn graph(
                 .tick_label_color(p.text_muted)
                 .tick_label_font(theme::font(11.5)),
         ])
-        .label_formatter(hover);
+        .label_formatter(hover)
+        .allow_drag([pan, false]);
 
     let line_color = p.accent;
+    let pick_fill = p.accent.gamma_multiply(0.14);
     let loss_fill = p.critical.gamma_multiply(0.32);
     let marker = p.text_secondary;
     let response = plot.show(&mut plot_ui, move |pui| {
@@ -560,8 +581,22 @@ fn graph(
         let series = series::build(history, lo, hi, points_wide as usize, interval, jitter);
         let top = series::latency_top(series.max_ms);
         pui.set_plot_bounds_y(0.0..=top);
-        // A switch to another network: a dashed line where it happened, named at the
-        // top. Close to the right edge the name goes on the left of the line.
+        // The stretch of time picked for its routes, or being picked.
+        if let Some((a, b)) = picked {
+            pui.span(Span::new("", a.min(b)..=a.max(b)).fill(pick_fill));
+        }
+        // A marker's name goes at the top, right of its line, or on its left close to
+        // the right edge. Widths are a generous guess, in points.
+        let secs_per_pt = (hi - lo).max(1e-9) / points_wide as f64;
+        let name_width = |name: &str| name.chars().count() as f64 * 6.5 + 12.0;
+        let beside = |at: f64, name: &str| {
+            if (hi - at) / secs_per_pt > name_width(name) {
+                (Align2::LEFT_TOP, format!(" {name}"))
+            } else {
+                (Align2::RIGHT_TOP, format!("{name} "))
+            }
+        };
+        // A switch to another network: a dashed line where it happened, named.
         for (i, switch) in switches.iter().enumerate().filter(|(_, s)| (lo..=hi).contains(&s.at)) {
             pui.vline(
                 VLine::new("", switch.at)
@@ -571,17 +606,40 @@ fn graph(
                     .style(LineStyle::dashed_dense())
                     .allow_hover(false),
             );
-            let name = format!("to {}", switch.to);
-            // Points right of the line, against a generous guess at the name's width.
-            let room = (hi - switch.at) / (hi - lo).max(1e-9) * points_wide as f64;
-            let (anchor, text) = if room > name.chars().count() as f64 * 6.5 + 12.0 {
-                (Align2::LEFT_TOP, format!(" {name}"))
-            } else {
-                (Align2::RIGHT_TOP, format!("{name} "))
-            };
+            let (anchor, text) = beside(switch.at, &format!("to {}", switch.to));
             pui.text(
                 Text::new("", PlotPoint::new(switch.at, top), RichText::new(text).size(11.5))
                     .id(("switch-name", i))
+                    .anchor(anchor)
+                    .color(marker)
+                    .allow_hover(false),
+            );
+        }
+        // A change of route within the network: a dotted line, named where that
+        // doesn't crowd another name.
+        let room = name_width(ROUTE_NAME) * secs_per_pt;
+        let mut clear_from = f64::NEG_INFINITY;
+        for (i, change) in route_changes
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| (lo..=hi).contains(&c.at))
+        {
+            pui.vline(
+                VLine::new("", change.at)
+                    .id(("route", i))
+                    .color(marker)
+                    .width(1.0)
+                    .style(LineStyle::dotted_dense())
+                    .allow_hover(false),
+            );
+            if change.at < clear_from || switches.iter().any(|s| (s.at - change.at).abs() < room * 2.0) {
+                continue;
+            }
+            clear_from = change.at + room;
+            let (anchor, text) = beside(change.at, ROUTE_NAME);
+            pui.text(
+                Text::new("", PlotPoint::new(change.at, top), RichText::new(text).size(11.5))
+                    .id(("route-name", i))
                     .anchor(anchor)
                     .color(marker)
                     .allow_hover(false),
@@ -634,7 +692,9 @@ fn graph(
     if let Some(strip_rect) = strip_rect {
         // As wide as the graph's plot area, so a moment sits at the same x in both.
         let rect = Rect::from_x_y_ranges(response.transform.frame().x_range(), strip_rect.y_range());
-        let plot = timeline_plot(("jitter", host.id.0), rect, link, clock, p).label_formatter(hover);
+        let plot = timeline_plot(("jitter", host.id.0), rect, link, clock, p)
+            .label_formatter(hover)
+            .allow_drag([pan, false]);
         r = r.union(jitter_strip(
             ui,
             rect,
@@ -645,13 +705,67 @@ fn graph(
             p,
         ));
     }
-    if r.dragged() || (r.hovered() && ui.input(|i| i.zoom_delta() != 1.0)) {
+    let picking = pick_routes(
+        ui,
+        &r,
+        &response.transform,
+        pick_id,
+        picking,
+        shift,
+        host.id,
+        secs_per_point,
+        out,
+    );
+    if (r.dragged() && !picking) || (r.hovered() && ui.input(|i| i.zoom_delta() != 1.0)) {
         out.left_live = true;
     }
     if r.double_clicked() {
         out.go_live = true;
     }
     Some((r, response.transform))
+}
+
+/// Shift+drag across a graph picks a stretch of time, to see the routes the host's
+/// traffic took then: kept under `id` while the drag lasts, and asked for when it
+/// ends. Returns whether the graph is being dragged for that.
+#[allow(clippy::too_many_arguments)]
+fn pick_routes(
+    ui: &Ui,
+    r: &Response,
+    transform: &PlotTransform,
+    id: Id,
+    picking: Option<(f64, f64)>,
+    shift: bool,
+    host: HostId,
+    secs_per_point: f64,
+    out: &mut LanesOutput,
+) -> bool {
+    let at = |pos: Pos2| transform.value_from_position(pos).x;
+    let pointer = ui.input(|i| i.pointer.latest_pos()).map(at);
+    match picking {
+        None if shift && r.drag_started() => {
+            let start = ui.input(|i| i.pointer.press_origin()).map(at).or(pointer);
+            if let Some(start) = start {
+                ui.data_mut(|d| d.insert_temp(id, (start, pointer.unwrap_or(start))));
+            }
+            true
+        }
+        None => false,
+        Some((start, end)) => {
+            let end = pointer.unwrap_or(end);
+            if r.dragged() {
+                ui.data_mut(|d| d.insert_temp(id, (start, end)));
+            } else {
+                ui.data_mut(|d| d.remove::<(f64, f64)>(id));
+                // Wide enough to be meant, rather than a twitch of the hand.
+                if (end - start).abs() >= secs_per_point * 4.0 {
+                    out.actions
+                        .push(LaneAction::Routes(host, start.min(end), start.max(end)));
+                }
+            }
+            true
+        }
+    }
 }
 
 /// A plot on the lanes' shared time axis. Dragging and zooming move it in time
@@ -743,11 +857,13 @@ fn jitter_strip(
     response
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hover_text(
     pos: &HoverPosition<'_>,
     history: &History,
     jitter: &[Vec<[f64; 2]>],
     switches: &[Switch],
+    route_changes: &[RouteChange],
     clock: &Clock,
     interval: f64,
     secs_per_point: f64,
@@ -769,11 +885,15 @@ fn hover_text(
         },
         None => Some(clock.time(t)),
     };
-    match switches.iter().find(|s| (s.at - t).abs() <= max_dt) {
-        Some(switch) => {
-            let note = format!("Switched to {} from {}", switch.to, switch.from);
-            Some(text.map_or_else(|| note.clone(), |text| format!("{note}\n{text}")))
-        }
+    let note = match switches.iter().find(|s| (s.at - t).abs() <= max_dt) {
+        Some(switch) => Some(format!("Switched to {} from {}", switch.to, switch.from)),
+        None => route_changes
+            .iter()
+            .find(|change| (change.at - t).abs() <= max_dt)
+            .map(route_history::change_note),
+    };
+    match note {
+        Some(note) => Some(text.map_or_else(|| note.clone(), |text| format!("{note}\n{text}"))),
         None => text,
     }
 }

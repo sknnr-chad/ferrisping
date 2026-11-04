@@ -24,6 +24,7 @@ use crate::alerts::HostChoice;
 use crate::args::Args;
 use crate::lanes;
 use crate::route::RouteView;
+use crate::route_history::{self, RouteHistory};
 use crate::theme::ThemeChoice;
 use crate::tray::{self, Tray, TrayCommand};
 use crate::window;
@@ -1111,6 +1112,238 @@ fn the_notice_can_be_read_again_from_the_menu() {
     assert!(!lookups_on(&harness));
 }
 
+/// A router on a made-up route, from a documentation range.
+fn doc_router(n: u8) -> IpAddr {
+    IpAddr::from([198, 51, 100, n])
+}
+
+/// Route checks of the first host every 2 seconds over the last minute: hop 2 is
+/// one router for the first half and another after that.
+fn record_routes(harness: &Harness<'_, FerrisPingApp>, now: f64) {
+    harness.state().monitor.edit_for_test(|state| {
+        let host = &mut state.hosts[0];
+        for i in 0..29 {
+            let second = if i < 14 { 2 } else { 7 };
+            let routers = [
+                Some((doc_router(1), 1.0)),
+                Some((doc_router(second), 8.0)),
+                Some((doc_router(3), 12.0)),
+            ];
+            host.paths
+                .record_for_test(now - 58.0 + 2.0 * f64::from(i), &routers, Some(15.0));
+        }
+        host.version += 1;
+    });
+}
+
+#[test]
+fn shift_dragging_a_graph_shows_the_routes_taken_then() {
+    let mut harness = app("");
+    harness.state().monitor.add_for_test(TargetSpec::new("192.0.2.10"));
+    record_routes(&harness, now_secs());
+    harness.run_steps(2);
+
+    let start = graph_point(&harness, "192.0.2.10") - vec2(160.0, 0.0);
+    harness.event(egui::Event::ModifiersChanged(Modifiers::SHIFT));
+    harness.hover_at(start);
+    harness.step();
+    harness.drag_at(start);
+    harness.step();
+    for dx in [10.0, 200.0, 420.0] {
+        harness.hover_at(start + vec2(dx, 0.0));
+        harness.step();
+    }
+    harness.drop_at(start + vec2(420.0, 0.0));
+    harness.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    harness.run_steps(3);
+
+    assert!(
+        harness.state().live,
+        "picking a stretch of time leaves the graphs where they were"
+    );
+    let seen = harness.state().routes_seen.as_ref().expect("the routes open");
+    assert!(
+        seen.t1 - seen.t0 > 30.0,
+        "the stretch dragged across: {} s",
+        seen.t1 - seen.t0
+    );
+    harness.get_by_label("Routes to");
+    harness.get_by_label("Route A");
+    harness.get_by_label("Route B");
+    assert!(harness.query_by_label_contains("the route changed once").is_some());
+
+    harness.get_by_label("Close routes").click();
+    harness.run_steps(2);
+    assert!(harness.state().routes_seen.is_none());
+}
+
+#[test]
+fn a_short_shift_click_picks_nothing() {
+    let mut harness = app("");
+    harness.state().monitor.add_for_test(TargetSpec::new("192.0.2.10"));
+    record_routes(&harness, now_secs());
+    harness.run_steps(2);
+    let point = graph_point(&harness, "192.0.2.10");
+    harness.event(egui::Event::ModifiersChanged(Modifiers::SHIFT));
+    click_at(&harness, point, PointerButton::Primary);
+    harness.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    harness.run_steps(3);
+    assert!(harness.state().routes_seen.is_none());
+}
+
+#[test]
+fn the_routes_seen_show_what_changed() {
+    let mut harness = app("");
+    let monitor = &harness.state().monitor;
+    let host = monitor.add_for_test(TargetSpec::new("192.0.2.10"));
+    let now = now_secs();
+    record_routes(&harness, now);
+    harness.state_mut().routes_seen = Some(RouteHistory::new(host, now - 120.0, now));
+    harness.run_steps(3);
+    harness.get_by_label("Route A");
+    harness.get_by_label("Route B");
+    assert!(
+        harness.query_by_label_contains("new at").is_some(),
+        "route B came in this stretch"
+    );
+    for router in [1, 2, 3, 7] {
+        let addr = doc_router(router).to_string();
+        assert!(
+            harness.query_all_by_label_contains(&addr).next().is_some(),
+            "{addr} shows"
+        );
+    }
+
+    harness.get_by_label("Copy report").click();
+    let report = output_within(&mut harness, copied).expect("the report goes to the clipboard");
+    assert!(report.contains("FerrisPing routes to 192.0.2.10"), "{report}");
+    assert!(report.contains("Route B, new at"), "{report}");
+    assert!(report.contains("(hop 2 changed)"), "{report}");
+    assert_eq!(report.matches("  changed").count(), 1, "one hop changed: {report}");
+
+    // The change is marked on the graph, unless a switch to another network marks it.
+    let change = |harness: &Harness<'_, FerrisPingApp>| {
+        let state = harness.state().monitor.read();
+        route_history::changes(&state.hosts[0])
+    };
+    let at = change(&harness).first().expect("one change").at;
+    assert_eq!(change(&harness).len(), 1);
+    harness.state().monitor.edit_for_test(|state| {
+        state.hosts[0].exit_changes.push(ExitChange {
+            at: at + 2.0,
+            from: 64500,
+            to: 64501,
+        });
+    });
+    assert!(change(&harness).is_empty());
+}
+
+#[test]
+fn the_routes_seen_show_where_delay_starts_and_where_an_outage_stops() {
+    let mut harness = app("");
+    let monitor = &harness.state().monitor;
+    let host = monitor.add_for_test(TargetSpec::new("192.0.2.10"));
+    let now = now_secs();
+    let start = now - 30.0 * 30.0;
+    monitor.edit_for_test(|state| {
+        let paths = &mut state.hosts[0].paths;
+        for i in 0..30 {
+            let t = start + 30.0 * f64::from(i);
+            match i {
+                // Then slower from hop 2 on, for ten checks.
+                10..20 => {
+                    let routers = [
+                        Some((doc_router(1), 1.0)),
+                        Some((doc_router(2), 48.0)),
+                        Some((doc_router(3), 52.0)),
+                    ];
+                    paths.record_for_test(t, &routers, Some(55.0));
+                }
+                // Then down: only the first hop answers.
+                20.. => paths.record_for_test(t, &[Some((doc_router(1), 1.0)), None, None], None),
+                _ => {
+                    let routers = [
+                        Some((doc_router(1), 1.0)),
+                        Some((doc_router(2), 8.0)),
+                        Some((doc_router(3), 12.0)),
+                    ];
+                    paths.record_for_test(t, &routers, Some(15.0));
+                }
+            }
+        }
+    });
+    harness.state_mut().routes_seen = Some(RouteHistory::new(host, start + 290.0, start + 580.0));
+    harness.run_steps(3);
+    assert!(harness.query_by_label_contains("one route").is_some());
+    assert!(
+        harness
+            .query_by_label_contains("round trips were up from hop 2 on")
+            .is_some(),
+        "the extra delay starts at hop 2"
+    );
+    // Hop 2, hop 3 and the host each took 40 ms longer than usual.
+    assert_eq!(harness.query_all_by_label("+40").count(), 3);
+
+    harness.state_mut().routes_seen = Some(RouteHistory::new(host, start + 590.0, now));
+    harness.run_steps(3);
+    assert!(
+        harness
+            .query_by_label_contains("nothing answered past hop 1 (198.51.100.1)")
+            .is_some(),
+        "where the route stopped"
+    );
+    harness.get_by_label("10 checks, the host answered 0");
+}
+
+#[test]
+fn a_slower_new_route_says_where_its_delay_starts() {
+    let mut harness = app("");
+    let monitor = &harness.state().monitor;
+    let host = monitor.add_for_test(TargetSpec::new("192.0.2.10"));
+    let now = now_secs();
+    monitor.edit_for_test(|state| {
+        let paths = &mut state.hosts[0].paths;
+        for i in 0..20 {
+            // The second half went another way from hop 2, 30 ms longer.
+            let (second, extra) = if i < 10 { (2, 0.0) } else { (7, 30.0) };
+            let routers = [
+                Some((doc_router(1), 1.0)),
+                Some((doc_router(second), 8.0 + extra)),
+                Some((doc_router(3), 12.0 + extra)),
+            ];
+            paths.record_for_test(now - 600.0 + 30.0 * f64::from(i), &routers, Some(15.0 + extra));
+        }
+    });
+    harness.state_mut().routes_seen = Some(RouteHistory::new(host, now - 610.0, now));
+    harness.run_steps(3);
+    assert!(
+        harness
+            .query_by_label_contains("Round trips on route B were longer than on route A from hop 2 on")
+            .is_some()
+    );
+}
+
+#[test]
+fn a_stretch_without_route_checks_says_why() {
+    let mut harness = app("");
+    let host = harness.state().monitor.add_for_test(TargetSpec::new("192.0.2.10"));
+    let now = now_secs();
+    harness.state_mut().routes_seen = Some(RouteHistory::new(host, now - 60.0, now));
+    harness.run_steps(3);
+    assert!(
+        harness
+            .query_by_label_contains("No route checks in this stretch")
+            .is_some()
+    );
+    harness.state().monitor.update_settings(|s| s.network_lookups = false);
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains("only checked while network lookups are on")
+            .is_some()
+    );
+}
+
 /// What a run after the first saved, with these hosts.
 fn saved_hosts(hosts: &[&str]) -> Saved {
     Saved {
@@ -1592,6 +1825,87 @@ fn render_switch() {
     });
     harness.run_steps(3);
     harness.render().unwrap().save(dir.join("ui-switch.png")).unwrap();
+}
+
+/// Renders a branch office whose traffic took a slower way, with the routes from
+/// before and after open under the lanes, in both themes. Nothing is probed:
+/// `FERRISPING_RENDER_DIR=<dir> cargo test -p ferrisping -- --ignored render_routes`
+#[test]
+#[ignore = "writes images; run by hand"]
+fn render_routes() {
+    let dir = std::path::PathBuf::from(std::env::var("FERRISPING_RENDER_DIR").expect("set FERRISPING_RENDER_DIR"));
+    for (theme, name) in [(ThemeChoice::Dark, "dark"), (ThemeChoice::Light, "light")] {
+        let mut harness = screenshot_app(theme, 15 * 60, vec2(1180.0, 860.0));
+        branch_office_reroute(&mut harness);
+        harness.run_steps(3);
+        harness
+            .render()
+            .unwrap()
+            .save(dir.join(format!("ui-routes-{name}.png")))
+            .unwrap();
+    }
+}
+
+/// Two lanes: a gateway, and a branch office whose traffic took another way six
+/// minutes ago, slower from the router that changed. The routes from nine minutes
+/// ago to three are open under them. Documentation addresses and networks only.
+fn branch_office_reroute(harness: &mut Harness<'_, FerrisPingApp>) {
+    let monitor = &harness.state().monitor;
+    for input in ["192.0.2.1 Gateway", "198.51.100.80 Branch office"] {
+        monitor.add_for_test(parse_targets(input).remove(0));
+    }
+    let now = now_secs();
+    let changed = now - 360.0;
+    let isp = |n: u8| IpAddr::from([203, 0, 113, n]);
+    let far = IpAddr::from([198, 51, 100, 1]);
+    monitor.edit_for_test(|state| {
+        for addr in [isp(1), isp(9), isp(17)] {
+            state
+                .networks
+                .insert_for_test(addr, 64500, "EXAMPLE-ISP - Example ISP, US");
+        }
+        state
+            .networks
+            .insert_for_test(far, 64501, "EXAMPLE-TRANSIT - Example Transit, US");
+        let gateway = &mut state.hosts[0];
+        make_up_samples(gateway, now, 15 * 60, Jitter::new(31, 0.6, 0.3), |_| false);
+        (gateway.status, gateway.status_since) = (HostStatus::Up, now - 3.0 * 3600.0);
+
+        let branch = &mut state.hosts[1];
+        branch.addr = branch.spec.host.parse().ok();
+        let (mut before, mut after) = (Jitter::new(32, 45.0, 2.5), Jitter::new(33, 82.0, 4.0));
+        for ago in (0..15 * 60).rev() {
+            let t = now - f64::from(ago) - 0.5;
+            let seq = branch.history.push_pending(t);
+            let rtt_ms = if t < changed { before.next_ms() } else { after.next_ms() };
+            branch.history.complete(seq, Outcome::Reply { rtt_ms });
+        }
+        (branch.status, branch.status_since) = (HostStatus::Up, now - 3.0 * 3600.0);
+        branch.exit = Some(Exit {
+            asn: 64500,
+            router: isp(1),
+            hop: 2,
+            since: now - 3.0 * 3600.0,
+            seen: now - 10.0,
+        });
+        // A route check every half minute. The ISP's third router changed, and the
+        // extra delay starts there.
+        for i in 0..30 {
+            let t = now - 895.0 + 30.0 * f64::from(i);
+            let (third, extra) = if t >= changed { (isp(17), 37.0) } else { (isp(9), 0.0) };
+            let wobble = (i % 3) as f32 * 0.4;
+            let routers = [
+                Some((IpAddr::from([192, 0, 2, 1]), 0.6 + wobble / 4.0)),
+                Some((isp(1), 8.0 + wobble)),
+                Some((third, 12.0 + extra + wobble)),
+                Some((far, 40.0 + extra + wobble)),
+            ];
+            branch.paths.record_for_test(t, &routers, Some(45.0 + extra + wobble));
+        }
+        branch.version += 1;
+    });
+    let host = monitor.read().hosts[1].id;
+    harness.state_mut().routes_seen = Some(RouteHistory::new(host, now - 540.0, now - 180.0));
 }
 
 /// Renders a real route in a window tall enough to show all of it:
