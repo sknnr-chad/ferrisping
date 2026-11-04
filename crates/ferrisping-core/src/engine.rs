@@ -17,8 +17,9 @@ use crate::alerts::{Alert, AlertSettings, HostAlerts, Watch};
 use crate::exit::{self, Exit, ExitChange};
 use crate::history::{History, Outcome, Sample};
 use crate::icmp::{self, EchoReply};
-use crate::network::Networks;
+use crate::network::{self, Networks};
 use crate::now_secs;
+use crate::paths::Paths;
 use crate::target::{Family, TargetSpec};
 use crate::trace::{Trace, TraceSettings};
 
@@ -101,13 +102,16 @@ pub struct Host {
     pub exit: Option<Exit>,
     /// Switches to another way out, oldest first.
     pub exit_changes: Vec<ExitChange>,
+    /// The ways its traffic took over the last day or so, as the route checks saw them.
+    pub paths: Paths,
     /// Alerts of its own, if it has them.
     pub alerts: HostAlerts,
     /// Where it stands with the loss and round-trip limits.
     watch: Watch,
     /// It was up when its latest outage began. Only then is the outage an alert: a host
     /// that never answered, like an unused address in a subnet, didn't stop answering.
-    was_up: bool,
+    /// Only then is its route checked during the outage, too.
+    pub(crate) was_up: bool,
     loss_streak: u32,
     loss_streak_start: f64,
     /// Next sample to feed into the up/down logic. Probes can finish out of
@@ -128,6 +132,7 @@ impl Host {
             version: 0,
             exit: None,
             exit_changes: Vec::new(),
+            paths: Paths::default(),
             alerts: HostAlerts::default(),
             watch: Watch::default(),
             was_up: false,
@@ -329,6 +334,8 @@ pub(crate) struct Shared {
     overhead_ms: AtomicU64,
     /// Taken by each host's check of its way out, so those run one at a time.
     pub(crate) exit_turn: tokio::sync::Mutex<()>,
+    /// The same for hosts that are down, which take their turns apart from the rest.
+    pub(crate) down_turn: tokio::sync::Mutex<()>,
     /// Host probes out on the network right now.
     probes_out: AtomicUsize,
 }
@@ -362,6 +369,7 @@ impl Shared {
             on_alert: RwLock::new(None),
             overhead_ms: AtomicU64::new(DEFAULT_OVERHEAD_MS.to_bits()),
             exit_turn: tokio::sync::Mutex::new(()),
+            down_turn: tokio::sync::Mutex::new(()),
             probes_out: AtomicUsize::new(0),
         }
     }
@@ -473,6 +481,7 @@ impl Shared {
         let seq = host.history.push_pending(t);
         host.history
             .trim(t - RETENTION_SECS, MAX_SAMPLES_PER_HOST, host.next_to_process);
+        host.paths.trim(t - RETENTION_SECS);
         host.version += 1;
         Some(seq)
     }
@@ -669,6 +678,27 @@ impl Monitor {
         self.shared.notify();
     }
 
+    /// Find out who runs each public router in `addrs` that isn't known yet, while
+    /// network lookups are on, as the route checks do for the routers they find.
+    /// The answers land in the state's [`Networks`].
+    pub fn look_up_owners(&self, addrs: impl IntoIterator<Item = IpAddr>) {
+        let Some(runtime) = self.runtime.as_ref() else { return };
+        let wanted: Vec<IpAddr> = {
+            let state = self.shared.read();
+            if !state.settings.network_lookups {
+                return;
+            }
+            addrs
+                .into_iter()
+                .filter(|&addr| state.networks.owner_wanted(addr))
+                .collect()
+        };
+        let _runtime = runtime.enter();
+        for addr in wanted {
+            network::look_up_owner(&self.shared, addr);
+        }
+    }
+
     /// For UI tests: change the state directly.
     #[doc(hidden)]
     pub fn edit_for_test(&self, edit: impl FnOnce(&mut State)) {
@@ -776,6 +806,7 @@ impl Monitor {
             host.loss_streak = 0;
             host.watch.restart(host.next_to_process);
             host.exit_changes.clear();
+            host.paths.clear();
             host.version += 1;
         }
         state.events.clear();

@@ -9,6 +9,7 @@ mod exit;
 mod history;
 mod icmp;
 mod network;
+mod paths;
 mod target;
 mod trace;
 
@@ -17,10 +18,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub use alerts::{Alert, AlertSettings, HostAlerts, Limits};
 pub use engine::{Event, EventKind, Host, HostId, HostStatus, Monitor, ProbeSettings, State, StateGuard};
-pub use exit::{CHECK_EVERY as EXIT_CHECK_EVERY, Exit, ExitChange};
+pub use exit::{CHECK_EVERY as EXIT_CHECK_EVERY, DOWN_CHECK_EVERY as EXIT_DOWN_CHECK_EVERY, Exit, ExitChange};
 pub use history::{History, Outcome, Sample, WindowStats};
 pub use icmp::{EchoReply, EchoStatus, echo};
 pub use network::{NetworkInfo, Networks, Owner, is_public};
+pub use paths::{IN_USE_SECS as PATH_IN_USE_SECS, Path, PathHop, PathSpan, Paths, RouterSeen, SpanHop};
 pub use target::{Family, TargetSpec, entries, parse_targets};
 pub use trace::{Hop, HopAddr, RECENT_RESULTS, Route, Trace, TraceSettings};
 

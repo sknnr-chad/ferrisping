@@ -58,7 +58,7 @@ pub struct Owners<'a> {
 impl Owners<'_> {
     /// Who owns `addr`, as far as the panel says. While network lookups are off,
     /// that's only whether it's private.
-    fn of(self, addr: IpAddr) -> Option<Owner> {
+    pub(crate) fn of(self, addr: IpAddr) -> Option<Owner> {
         self.networks
             .owner(addr)
             .filter(|&owner| self.lookups || owner == Owner::Private)
@@ -75,6 +75,8 @@ pub enum RouteAction {
     Copy(String),
     /// Give a network (by AS number) a name of the user's choosing.
     RenameNetwork(u32),
+    /// Find out who runs these routers, for the routes a host's traffic took.
+    LookUpOwners(Vec<IpAddr>),
 }
 
 #[derive(Default)]
@@ -139,7 +141,7 @@ pub fn show(ui: &mut Ui, view: &RouteView, host: &Host, owners: Owners<'_>, cloc
 }
 
 /// The gap above the panel: drag it to resize, double-click it to fit the route.
-fn resize_handle(ui: &mut Ui, p: &Palette) -> Response {
+pub(crate) fn resize_handle(ui: &mut Ui, p: &Palette) -> Response {
     let height = GAP - ui.spacing().item_spacing.y;
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
     if response.hovered() || response.dragged() {
@@ -469,7 +471,7 @@ fn network_cell(ui: &mut Ui, owners: Owners<'_>, hop: &Hop, p: &Palette, actions
         .on_hover_text(tip);
 }
 
-fn network_label(ui: &mut Ui, networks: &Networks, asn: u32, p: &Palette, actions: &mut Vec<RouteAction>) {
+pub(crate) fn network_label(ui: &mut Ui, networks: &Networks, asn: u32, p: &Palette, actions: &mut Vec<RouteAction>) {
     let name = networks.name(asn);
     let response = ui.add(
         Label::new(RichText::new(&name).color(p.text_secondary))

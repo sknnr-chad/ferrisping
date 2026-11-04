@@ -11,6 +11,7 @@ mod events;
 mod format;
 mod lanes;
 mod route;
+mod route_history;
 mod series;
 mod theme;
 mod tray;
