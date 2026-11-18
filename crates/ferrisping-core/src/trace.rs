@@ -318,6 +318,7 @@ impl Route {
 }
 
 struct TraceShared {
+    target: IpAddr,
     route: RwLock<Route>,
     engine: Arc<Shared>,
 }
@@ -336,7 +337,11 @@ impl TraceShared {
         let new_addr = self.write().record(ttl, &reply, rtt_ms);
         if let Some(addr) = new_addr {
             self.look_up_name(addr);
-            network::look_up_owner(&self.engine, addr);
+            // Only routers are asked about: the host being watched is nobody else's
+            // business.
+            if addr != self.target {
+                network::look_up_owner(&self.engine, addr);
+            }
         }
         self.engine.notify();
     }
@@ -351,6 +356,7 @@ impl TraceShared {
             .hops
             .iter()
             .flat_map(|hop| hop.addrs.iter().map(|a| a.addr))
+            .filter(|&addr| addr != self.target)
             .collect();
         let wanted: Vec<IpAddr> = {
             let state = self.engine.read();
@@ -407,6 +413,7 @@ pub struct Trace {
 impl Trace {
     pub(crate) fn start(runtime: &Runtime, engine: Arc<Shared>, target: IpAddr, settings: TraceSettings) -> Self {
         let shared = Arc::new(TraceShared {
+            target,
             route: RwLock::new(Route::new(target, settings.max_hops)),
             engine,
         });
@@ -417,6 +424,7 @@ impl Trace {
     /// A route that is never probed, for tests to fill in.
     pub(crate) fn idle(runtime: &Runtime, engine: Arc<Shared>, target: IpAddr) -> Self {
         let shared = Arc::new(TraceShared {
+            target,
             route: RwLock::new(Route::new(target, TraceSettings::default().max_hops)),
             engine,
         });

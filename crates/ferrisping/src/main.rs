@@ -57,6 +57,10 @@ fn main() -> eframe::Result {
             wgpu::Backends::from_env().unwrap_or(wgpu::Backends::DX12 | wgpu::Backends::GL);
         setup.power_preference = wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::LowPower);
     }
+    // Only the main copy writes to the saved file. A session of hosts from the command
+    // line reads it for the settings, and would otherwise write the whole file back,
+    // with the hosts as they were when it started, each time its window moved.
+    options.persist_window = main_copy;
     if args.screenshot.is_some() {
         // Pictures for docs and checks start from the defaults, and leave the saved
         // window and panel sizes alone.

@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
@@ -38,9 +38,18 @@ const BLOCKING_THREADS: usize = 512;
 /// Most host probes out at once. Each holds a blocking thread until it's answered
 /// or times out; the other threads are left for traceroutes and lookups.
 const MAX_PROBES_OUT: usize = 320;
-/// How many of those hosts whose last probe is still out may take. Hosts that
-/// don't answer are slowed down first, so hosts that answer keep their pace.
+/// How many of those may be taken by hosts whose last probe wasn't answered, or
+/// is still out. Hosts that don't answer are slowed down first, and the rest is
+/// kept for hosts that do, so those keep their pace.
 const MAX_PROBES_OUT_WAITING: usize = 256;
+/// A host whose probe was skipped tries again after this share of the interval,
+/// ahead of its next turn, so the same hosts aren't the ones skipped every time.
+const SKIPPED_RETRY_DIVISOR: u32 = 4;
+/// A streak of lost pings ends when no ping was sent for this many intervals, or
+/// [`STREAK_BREAK_MIN_SECS`] if that's longer: the computer slept, or probing was
+/// paused, and what was lost before says nothing about now.
+const STREAK_BREAK_INTERVALS: f64 = 5.0;
+const STREAK_BREAK_MIN_SECS: f64 = 10.0;
 
 /// Settings shared by every host.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -114,6 +123,8 @@ pub struct Host {
     pub(crate) was_up: bool,
     loss_streak: u32,
     loss_streak_start: f64,
+    /// When the last ping counted in the streak was sent.
+    loss_streak_last: f64,
     /// Next sample to feed into the up/down logic. Probes can finish out of
     /// order (a timeout ends after newer replies), so this walks in send order.
     next_to_process: u64,
@@ -138,6 +149,7 @@ impl Host {
             was_up: false,
             loss_streak: 0,
             loss_streak_start: now,
+            loss_streak_last: now,
             next_to_process: 0,
         }
     }
@@ -153,7 +165,8 @@ impl Host {
     }
 
     /// Update up/down state with one finished sample, returning an event on a change.
-    fn observe(&mut self, sample: &Sample, down_after: u32) -> Option<EventKind> {
+    /// Lost pings sent more than `streak_break` seconds apart aren't one streak.
+    fn observe(&mut self, sample: &Sample, down_after: u32, streak_break: f64) -> Option<EventKind> {
         match sample.outcome {
             Outcome::Pending => None,
             Outcome::Reply { .. } => {
@@ -168,9 +181,11 @@ impl Host {
                 event
             }
             Outcome::Lost(_) => {
-                if self.loss_streak == 0 {
+                if self.loss_streak == 0 || sample.t - self.loss_streak_last > streak_break {
+                    self.loss_streak = 0;
                     self.loss_streak_start = sample.t;
                 }
+                self.loss_streak_last = sample.t;
                 self.loss_streak += 1;
                 if self.status != HostStatus::Down && self.loss_streak >= down_after.max(1) {
                     self.was_up = self.status == HostStatus::Up;
@@ -338,18 +353,37 @@ pub(crate) struct Shared {
     pub(crate) down_turn: tokio::sync::Mutex<()>,
     /// Host probes out on the network right now.
     probes_out: AtomicUsize,
+    /// Where every host's place in the interval is counted from.
+    started: Instant,
+}
+
+/// How one host's probes are going, for sharing out the slots.
+#[derive(Default)]
+struct HostProbes {
+    /// Probes still out.
+    out: AtomicUsize,
+    /// The last probe to finish was answered.
+    answered: AtomicBool,
+}
+
+impl HostProbes {
+    /// Whether the host answers as far as anyone knows: its last probe did, and
+    /// none is still out.
+    fn answering(&self) -> bool {
+        self.answered.load(Ordering::Relaxed) && self.out.load(Ordering::Relaxed) == 0
+    }
 }
 
 /// A probe out on the network, counted until it's answered or times out.
 struct ProbeSlot {
     shared: Arc<Shared>,
-    host_out: Arc<AtomicUsize>,
+    host: Arc<HostProbes>,
 }
 
 impl Drop for ProbeSlot {
     fn drop(&mut self) {
         self.shared.probes_out.fetch_sub(1, Ordering::Relaxed);
-        self.host_out.fetch_sub(1, Ordering::Relaxed);
+        self.host.out.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -371,26 +405,28 @@ impl Shared {
             exit_turn: tokio::sync::Mutex::new(()),
             down_turn: tokio::sync::Mutex::new(()),
             probes_out: AtomicUsize::new(0),
+            started: Instant::now(),
         }
     }
 
-    /// Room for one more probe from a host that has `host_out` probes out, or None
-    /// when too many are out: queued behind them, it would only fall behind.
-    fn take_slot(self: &Arc<Self>, host_out: &Arc<AtomicUsize>) -> Option<ProbeSlot> {
-        let limit = if host_out.load(Ordering::Relaxed) > 0 {
-            MAX_PROBES_OUT_WAITING
-        } else {
+    /// Room for one more probe from `host`, or None when too many are out: queued
+    /// behind them, it would only fall behind. Only a host that answers gets the
+    /// slots above [`MAX_PROBES_OUT_WAITING`].
+    fn take_slot(self: &Arc<Self>, host: &Arc<HostProbes>) -> Option<ProbeSlot> {
+        let limit = if host.answering() {
             MAX_PROBES_OUT
+        } else {
+            MAX_PROBES_OUT_WAITING
         };
         self.probes_out
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |out| {
                 (out < limit).then_some(out + 1)
             })
             .ok()?;
-        host_out.fetch_add(1, Ordering::Relaxed);
+        host.out.fetch_add(1, Ordering::Relaxed);
         Some(ProbeSlot {
             shared: Arc::clone(self),
-            host_out: Arc::clone(host_out),
+            host: Arc::clone(host),
         })
     }
 
@@ -490,6 +526,7 @@ impl Shared {
         let mut guard = self.write();
         let state = &mut *guard;
         let usual = state.alerts.limits;
+        let streak_break = (STREAK_BREAK_INTERVALS * state.settings.interval.as_secs_f64()).max(STREAK_BREAK_MIN_SECS);
         let Some(host) = state.hosts.iter_mut().find(|h| h.id == id) else {
             return;
         };
@@ -515,7 +552,7 @@ impl Shared {
             let done = host.next_to_process;
             host.next_to_process += 1;
             let mut kinds = Vec::new();
-            if let Some(kind) = host.observe(&sample, down_after) {
+            if let Some(kind) = host.observe(&sample, down_after, streak_break) {
                 match kind {
                     // The outage is the alert now. Once it's over, its lost pings don't
                     // count toward the loss.
@@ -846,9 +883,11 @@ async fn run_host(shared: Arc<Shared>, id: HostId, spec: TargetSpec) {
     // Follow which network the traffic leaves through, for as long as this host is probed.
     let _exit_watch = AbortOnDrop(tokio::spawn(exit::watch(shared.clone(), id, addr)));
 
-    // This host's probes still out; while one is, the host gets fewer slots.
-    let out = Arc::new(AtomicUsize::new(0));
+    // Hosts that don't answer get fewer slots.
+    let probes = Arc::new(HostProbes::default());
     let mut last_sent: Option<Instant> = None;
+    // When to try again after a probe was skipped.
+    let mut retry: Option<Instant> = None;
     loop {
         let s = *settings.borrow_and_update();
         if s.paused {
@@ -856,9 +895,14 @@ async fn run_host(shared: Arc<Shared>, id: HostId, spec: TargetSpec) {
                 return;
             }
             last_sent = None;
+            retry = None;
             continue;
         }
-        let due = last_sent.map_or_else(Instant::now, |t| t + s.interval);
+        // The first probe goes at once. After it each host keeps a place of its own
+        // in the interval, so a subnet's probes don't all go out in the same instant.
+        let due = retry.unwrap_or_else(|| {
+            last_sent.map_or_else(Instant::now, |last| next_turn(shared.started, last, s.interval, id))
+        });
         tokio::select! {
             _ = tokio::time::sleep_until(due) => {}
             changed = settings.changed() => {
@@ -872,18 +916,21 @@ async fn run_host(shared: Arc<Shared>, id: HostId, spec: TargetSpec) {
         // instead of firing a burst of catch-up probes.
         let now = Instant::now();
         last_sent = Some(if now.duration_since(due) > s.interval { now } else { due });
+        retry = None;
 
         let t = crate::now_secs();
         // Too many probes out (lots of hosts that don't answer, at a short
         // interval): skip this one rather than queue it and fall behind.
-        let Some(slot) = shared.take_slot(&out) else {
+        let Some(slot) = shared.take_slot(&probes) else {
             shared.write().probes_skipped_at = Some(t);
+            retry = Some(now + s.interval / SKIPPED_RETRY_DIVISOR);
             continue;
         };
         let Some(seq) = shared.begin_probe(id, t) else {
             return;
         };
         let task_shared = shared.clone();
+        let task_probes = Arc::clone(&probes);
         // A probe already sent runs to its end even if the host is removed:
         // Windows can't take it back, and finish_probe drops what it brings.
         tokio::spawn(async move {
@@ -894,9 +941,25 @@ async fn run_host(shared: Arc<Shared>, id: HostId, spec: TargetSpec) {
             });
             // Every probe gets an outcome: the samples after it wait for this one.
             let reply = probe.await.unwrap_or_else(|_| EchoReply::general_failure());
+            task_probes.answered.store(reply.status.is_reply(), Ordering::Relaxed);
             task_shared.finish_probe(id, seq, reply, s.down_after);
         });
     }
+}
+
+/// When a host that last probed at `last` probes next: at its own place in the
+/// interval, between half an interval and one and a half after `last`. From then
+/// on its turns are an interval apart.
+fn next_turn(started: Instant, last: Instant, interval: Duration, id: HostId) -> Instant {
+    let interval_secs = interval.as_secs_f64();
+    if interval_secs <= 0.0 {
+        return last;
+    }
+    // Multiples of the golden ratio land evenly, however many hosts there are.
+    let place = (id.0 as f64 * 0.618_033_988_749_895).fract() * interval_secs;
+    let earliest = (last + interval / 2).saturating_duration_since(started).as_secs_f64();
+    let turns = ((earliest - place) / interval_secs).ceil();
+    started + Duration::from_secs_f64((turns * interval_secs + place).max(0.0))
 }
 
 /// Aborts a task when dropped, so it lives only as long as whatever holds this.
@@ -1034,21 +1097,87 @@ mod tests {
     #[test]
     fn probes_out_are_capped_and_hosts_that_dont_answer_wait_first() {
         let shared = Arc::new(Shared::new(ProbeSettings::default()));
-        let host = || Arc::new(AtomicUsize::new(0));
-        // A host that doesn't answer keeps probes out, so it's held back first.
-        let silent = host();
-        let mut slots: Vec<ProbeSlot> = std::iter::from_fn(|| shared.take_slot(&silent)).collect();
+        let silent = || Arc::new(HostProbes::default());
+        let answering = || {
+            let host = silent();
+            host.answered.store(true, Ordering::Relaxed);
+            host
+        };
+        // Hosts that haven't answered are held back first, each with nothing else
+        // out, as when a subnet of unused addresses is probed slower than its timeout.
+        let mut slots: Vec<ProbeSlot> = std::iter::from_fn(|| shared.take_slot(&silent())).collect();
         assert_eq!(slots.len(), MAX_PROBES_OUT_WAITING);
-        // Hosts with nothing out still get a slot, up to the overall cap.
-        slots.extend(std::iter::from_fn(|| shared.take_slot(&host())));
+        // So is one that answered last time while its next probe is still out.
+        let slow = answering();
+        slots.extend(shared.take_slot(&slow));
+        assert!(shared.take_slot(&slow).is_none());
+        // Hosts that answer still get a slot, up to the overall cap.
+        slots.extend(std::iter::from_fn(|| shared.take_slot(&answering())));
         assert_eq!(slots.len(), MAX_PROBES_OUT);
-        assert!(shared.take_slot(&host()).is_none());
+        assert!(shared.take_slot(&answering()).is_none());
         // Each probe gives its slot back when it ends.
         slots.pop();
-        assert!(shared.take_slot(&host()).is_some());
+        assert!(shared.take_slot(&answering()).is_some());
         drop(slots);
         assert_eq!(shared.probes_out.load(Ordering::Relaxed), 0);
-        assert_eq!(silent.load(Ordering::Relaxed), 0);
+        assert_eq!(slow.out.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_loss_streak_doesnt_carry_across_a_long_gap() {
+        let (shared, id) = shared_with_host();
+        // One ping lost as the laptop goes to sleep, two more as it wakes hours later.
+        for (t, status) in [
+            (1.0, EchoStatus::Reply),
+            (2.0, EchoStatus::TimedOut),
+            (30_000.0, EchoStatus::TimedOut),
+            (30_001.0, EchoStatus::TimedOut),
+            (30_002.0, EchoStatus::Reply),
+        ] {
+            let seq = shared.begin_probe(id, t).unwrap();
+            shared.finish_probe(id, seq, reply(status), 3);
+        }
+        assert!(shared.state.read().unwrap().events.is_empty());
+        // Three in a row after the gap are an outage, dated from the first of them.
+        for (t, status) in [
+            (40_000.0, EchoStatus::TimedOut),
+            (40_001.0, EchoStatus::TimedOut),
+            (40_002.0, EchoStatus::TimedOut),
+        ] {
+            let seq = shared.begin_probe(id, t).unwrap();
+            shared.finish_probe(id, seq, reply(status), 3);
+        }
+        let state = shared.state.read().unwrap();
+        let kinds: Vec<_> = state.events.iter().map(|e| (e.at, e.kind.clone())).collect();
+        assert_eq!(kinds, [(40_000.0, EventKind::Down)]);
+    }
+
+    #[test]
+    fn hosts_keep_places_of_their_own_in_the_interval() {
+        let started = Instant::now();
+        let interval = Duration::from_secs(1);
+        let secs = |at: Instant| at.duration_since(started).as_secs_f64();
+        let mut places = Vec::new();
+        for id in 1..=254 {
+            let first = started + Duration::from_millis(100);
+            let second = next_turn(started, first, interval, HostId(id));
+            let gap = secs(second) - secs(first);
+            assert!(
+                (0.5..=1.5).contains(&gap),
+                "host {id} waits {gap} s for its second ping"
+            );
+            // From then on, exactly an interval apart.
+            let third = next_turn(started, second, interval, HostId(id));
+            assert!((secs(third) - secs(second) - 1.0).abs() < 1e-6);
+            places.push(secs(second).fract());
+        }
+        // A /24's probes are spread out: no tenth of the interval gets many more
+        // than a tenth of them.
+        for tenth in 0..10 {
+            let (from, to) = (f64::from(tenth) / 10.0, f64::from(tenth + 1) / 10.0);
+            let here = places.iter().filter(|&&p| p >= from && p < to).count();
+            assert!((20..=31).contains(&here), "{here} hosts probe in tenth {tenth}");
+        }
     }
 
     #[test]
