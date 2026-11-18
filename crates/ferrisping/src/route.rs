@@ -325,7 +325,7 @@ fn hop_row(
         });
     });
     row.col(|ui| host_cell(ui, route, hop, p, actions));
-    row.col(|ui| network_cell(ui, owners, hop, p, actions));
+    row.col(|ui| network_cell(ui, owners, hop, route.target, p, actions));
     row.col(|ui| {
         ui.with_layout(right, |ui| loss_cell(ui, hop, real_loss, p));
     });
@@ -441,11 +441,23 @@ fn host_cell(ui: &mut Ui, route: &Route, hop: &Hop, p: &Palette, actions: &mut V
 }
 
 /// The network a hop's router belongs to, e.g. the ISP.
-fn network_cell(ui: &mut Ui, owners: Owners<'_>, hop: &Hop, p: &Palette, actions: &mut Vec<RouteAction>) {
+fn network_cell(
+    ui: &mut Ui,
+    owners: Owners<'_>,
+    hop: &Hop,
+    target: IpAddr,
+    p: &Palette,
+    actions: &mut Vec<RouteAction>,
+) {
     let Some(addr) = hop.addr() else {
         return;
     };
     let (text, tip) = match owners.of(addr) {
+        // Known only if it's also a router on some route.
+        None if addr == target => (
+            "Not asked",
+            "FerrisPing asks Team Cymru who runs the routers on a route, never the hosts you add.",
+        ),
         Some(Owner::Network(asn)) => return network_label(ui, owners.networks, asn, p, actions),
         Some(Owner::Private) => (
             "Private",
@@ -718,6 +730,8 @@ fn report(route: &Route, host: &Host, owners: Owners<'_>, clock: &Clock) -> Stri
             Some(Owner::Network(asn)) => format!("{} AS{asn}", owners.networks.name(asn)),
             Some(Owner::Private) => "private".to_string(),
             Some(Owner::Unannounced) => "not announced".to_string(),
+            // The host itself is never asked about.
+            None if hop.addr() == Some(route.target) => String::new(),
             None if !owners.lookups && hop.addr().is_some() => "lookups off".to_string(),
             None => String::new(),
         };

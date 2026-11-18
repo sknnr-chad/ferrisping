@@ -263,11 +263,18 @@ async fn follow(
                     _ => &shared.exit_turn,
                 };
                 let _turn = queue.lock().await;
-                down_round = (turn == Turn::Down).then_some(started);
+                // The wait for a turn can be long: go by what the settings say now.
+                let s = *settings.borrow();
+                if !s.network_lookups {
+                    return true;
+                }
                 match turn_of(shared, id) {
                     None => return false,
                     Some(Turn::SitOut) => None,
+                    // Paused while waiting: nothing goes out. The loop waits it out.
+                    Some(_) if s.paused => None,
                     Some(_) => {
+                        down_round = (turn == Turn::Down).then_some(started);
                         let limit = reached.unwrap_or(MAX_HOPS).min(MAX_HOPS);
                         let t = now_secs();
                         Some((t, probe(target, limit, s, shared.overhead_ms()).await))

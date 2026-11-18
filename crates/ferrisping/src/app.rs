@@ -1005,18 +1005,19 @@ impl eframe::App for FerrisPingApp {
                         (None, Some(seen)) => route_history::show(ui, seen, host, owners, &self.clock, p),
                         (None, None) => RouteOutput::default(),
                     };
-                    route_out = Some((room, height, out));
+                    route_out = Some((room, height, under_lanes, out));
                 });
         }
         let route_open = route_out.is_some();
-        if let Some((room, height, out)) = route_out {
+        if let Some((room, height, under_lanes, out)) = route_out {
             self.route_fit = height + out.missing_height;
             if out.fit {
                 self.route_height = None;
             } else if out.resized_by != 0.0 {
                 self.route_height = Some((height + out.resized_by).clamp(ROUTE_MIN_HEIGHT, route_max_height(room)));
             }
-            if (self.route_panel_height(room) - height).abs() > 0.5 {
+            // Once more when the height it should have changed, and no more than that.
+            if (self.route_panel_height(room).max(under_lanes) - height).abs() > 0.5 {
                 ui.ctx().request_repaint();
             }
             actions.extend(out.actions.into_iter().map(Action::Route));
@@ -1065,7 +1066,9 @@ impl eframe::App for FerrisPingApp {
     }
 
     fn persist_egui_memory(&self) -> bool {
-        self.screenshot.is_none()
+        // A one-off session shares the saved file with the main copy and writes
+        // nothing to it: a write would put back the hosts it read when it started.
+        !self.session && self.screenshot.is_none()
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
